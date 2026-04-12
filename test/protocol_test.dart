@@ -318,6 +318,7 @@ void main() {
       await Future.delayed(Duration.zero);
       expect(protocol.state.muted, true);
       expect(receivedMuted, true);
+      expect(receivedVolume, 1.0);
     });
 
     test('resetForNewConnection stops timers and resets clock', () {
