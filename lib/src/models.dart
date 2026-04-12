@@ -69,3 +69,25 @@ class SendspinPlayerState {
     );
   }
 }
+
+/// Audio format configuration received in a stream/start message.
+///
+/// Used by [SendspinProtocol] to communicate the negotiated format
+/// to consumers without coupling them to the full message parsing.
+class StreamConfig {
+  final String codec;
+  final int channels;
+  final int sampleRate;
+  final int bitDepth;
+
+  /// Optional base64-encoded codec header (e.g. FLAC STREAMINFO).
+  final String? codecHeader;
+
+  const StreamConfig({
+    required this.codec,
+    required this.channels,
+    required this.sampleRate,
+    required this.bitDepth,
+    this.codecHeader,
+  });
+}
