@@ -1,0 +1,10 @@
+name: sendspin_dart
+description: Pure Dart implementation of the Sendspin streaming audio protocol for Music Assistant.
+version: 0.1.0
+repository: https://github.com/chrisuthe/sendspin_dart
+
+environment:
+  sdk: ^3.0.0
+
+dev_dependencies:
+  test: ^1.24.0
