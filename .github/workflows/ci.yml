@@ -1,0 +1,98 @@
+# ABOUTME: CI workflow for pull requests and main branch pushes
+# ABOUTME: Runs tests, formatting, and analysis on the pure Dart library
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Dart
+      uses: dart-lang/setup-dart@v1
+      with:
+        sdk: stable
+
+    - name: Print Dart version
+      run: dart --version
+
+    - name: Cache pub dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.pub-cache
+        key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pub-
+
+    - name: Install dependencies
+      run: dart pub get
+
+    - name: Run tests with coverage
+      run: dart test --coverage=coverage
+
+    - name: Format coverage for Codecov
+      run: |
+        dart pub global activate coverage
+        dart pub global run coverage:format_coverage \
+          --lcov \
+          --in=coverage \
+          --out=coverage/lcov.info \
+          --packages=.dart_tool/package_config.json \
+          --report-on=lib
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        files: ./coverage/lcov.info
+        flags: unittests
+        fail_ci_if_error: false
+
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Dart
+      uses: dart-lang/setup-dart@v1
+      with:
+        sdk: stable
+
+    - name: Install dependencies
+      run: dart pub get
+
+    - name: Verify formatting
+      run: dart format --output=none --set-exit-if-changed .
+
+    - name: Analyze project source
+      run: dart analyze --fatal-infos --fatal-warnings
+
+  min-sdk:
+    name: Minimum SDK (3.0)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Dart 3.0
+      uses: dart-lang/setup-dart@v1
+      with:
+        sdk: "3.0"
+
+    - name: Install dependencies
+      run: dart pub get
+
+    - name: Run tests
+      run: dart test

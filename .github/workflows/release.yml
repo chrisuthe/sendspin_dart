@@ -1,0 +1,196 @@
+# ABOUTME: Release workflow triggered by version tags
+# ABOUTME: Validates the library and creates a GitHub release with changelog notes
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test Before Release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Dart
+      uses: dart-lang/setup-dart@v1
+      with:
+        sdk: stable
+
+    - name: Install dependencies
+      run: dart pub get
+
+    - name: Verify formatting
+      run: dart format --output=none --set-exit-if-changed .
+
+    - name: Analyze project source
+      run: dart analyze --fatal-infos --fatal-warnings
+
+    - name: Run tests
+      run: dart test
+
+  validate:
+    name: Validate Package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Dart
+      uses: dart-lang/setup-dart@v1
+      with:
+        sdk: stable
+
+    - name: Install dependencies
+      run: dart pub get
+
+    - name: Get version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Verify pubspec version matches tag
+      env:
+        TAG_VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        # Strip leading 'v' from tag (e.g. v0.2.0 → 0.2.0)
+        EXPECTED="${TAG_VERSION#v}"
+        ACTUAL=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+        echo "Tag version:     $EXPECTED"
+        echo "Pubspec version: $ACTUAL"
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+          echo "::error::pubspec.yaml version ($ACTUAL) does not match tag ($EXPECTED)"
+          exit 1
+        fi
+
+    - name: Dry-run pub publish
+      run: dart pub publish --dry-run
+
+    - name: Create package archive
+      env:
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        mkdir -p dist
+        ARCHIVE="sendspin_dart-${VERSION}.tar.gz"
+        tar czf "dist/${ARCHIVE}" \
+          --exclude='./.git' \
+          --exclude='./.github' \
+          --exclude='./.dart_tool' \
+          --exclude='./dist' \
+          --exclude='./docs' \
+          --exclude='./coverage' \
+          --exclude='./pubspec.lock' \
+          .
+        ls -lh dist/
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: package
+        path: dist/*.tar.gz
+
+  release:
+    name: Create Release
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        pattern: package
+        merge-multiple: true
+
+    - name: List artifacts
+      run: ls -lh artifacts/
+
+    - name: Generate release notes
+      id: release_notes
+      env:
+        RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        PREV_TAG=$(git describe --tags --abbrev=0 "${RELEASE_VERSION}^" 2>/dev/null || echo "")
+        if [ -z "$PREV_TAG" ]; then
+          echo "NOTES=Initial release" >> $GITHUB_OUTPUT
+        else
+          NOTES=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..${RELEASE_VERSION}")
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.VERSION }}
+        name: Release ${{ steps.version.outputs.VERSION }}
+        body: |
+          ## sendspin_dart ${{ steps.version.outputs.VERSION }}
+
+          Pure Dart implementation of the Sendspin streaming audio protocol.
+
+          ### Installation
+
+          Add to your `pubspec.yaml`:
+
+          ```yaml
+          dependencies:
+            sendspin_dart:
+              git:
+                url: https://github.com/chrisuthe/sendspin_dart.git
+                ref: ${{ steps.version.outputs.VERSION }}
+          ```
+
+          Or if published to pub.dev:
+
+          ```yaml
+          dependencies:
+            sendspin_dart: ^${{ steps.version.outputs.VERSION }}
+          ```
+
+          ### Usage
+
+          ```dart
+          import 'package:sendspin_dart/sendspin_dart.dart';
+
+          // Audio playback pipeline
+          final player = SendspinPlayer(
+            playerName: 'Kitchen',
+            clientId: 'kitchen-1',
+            bufferSeconds: 5,
+          );
+
+          // Or raw protocol only (for visualizers, conformance tests, etc.)
+          final protocol = SendspinProtocol(
+            playerName: 'Visualizer',
+            clientId: 'viz-1',
+            bufferSeconds: 5,
+          );
+          ```
+
+          ### Changes
+
+          ${{ steps.release_notes.outputs.NOTES }}
+        files: |
+          artifacts/*.tar.gz
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
