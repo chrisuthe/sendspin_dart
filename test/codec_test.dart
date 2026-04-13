@@ -26,8 +26,12 @@ void main() {
       // Encode two 24-bit samples: 0x100000 (1048576) and 0x200000 (2097152)
       // These truncate to 0x1000 (4096) and 0x2000 (8192) as Int16.
       final bytes = Uint8List(6);
-      bytes[0] = 0x00; bytes[1] = 0x00; bytes[2] = 0x10; // 0x100000
-      bytes[3] = 0x00; bytes[4] = 0x00; bytes[5] = 0x20; // 0x200000
+      bytes[0] = 0x00;
+      bytes[1] = 0x00;
+      bytes[2] = 0x10; // 0x100000
+      bytes[3] = 0x00;
+      bytes[4] = 0x00;
+      bytes[5] = 0x20; // 0x200000
       final samples = codec.decode(bytes);
       expect(samples, isA<Int16List>());
       expect(samples.length, 2);
@@ -50,20 +54,23 @@ void main() {
 
   group('createCodec', () {
     test('creates PcmCodec for pcm codec string', () {
-      final codec = createCodec(codec: 'pcm', bitDepth: 16, channels: 2, sampleRate: 48000);
+      final codec = createCodec(
+          codec: 'pcm', bitDepth: 16, channels: 2, sampleRate: 48000);
       expect(codec, isA<PcmCodec>());
     });
 
     test('throws for unsupported codec', () {
       expect(
-        () => createCodec(codec: 'opus', bitDepth: 16, channels: 2, sampleRate: 48000),
+        () => createCodec(
+            codec: 'opus', bitDepth: 16, channels: 2, sampleRate: 48000),
         throwsArgumentError,
       );
     });
 
     test('throws for flac without custom factory', () {
       expect(
-        () => createCodec(codec: 'flac', bitDepth: 16, channels: 2, sampleRate: 48000),
+        () => createCodec(
+            codec: 'flac', bitDepth: 16, channels: 2, sampleRate: 48000),
         throwsArgumentError,
       );
     });

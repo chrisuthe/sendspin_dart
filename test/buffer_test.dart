@@ -7,7 +7,10 @@ void main() {
   group('SendspinBuffer', () {
     test('buffers chunks and retrieves in timestamp order', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
       buffer.addChunk(2000, Int16List.fromList([5, 6, 7, 8]));
       buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
@@ -18,7 +21,10 @@ void main() {
 
     test('returns silence on underrun', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
       final samples = buffer.pullSamples(4);
       expect(samples, [0, 0, 0, 0]);
@@ -26,7 +32,10 @@ void main() {
 
     test('flush clears all buffered data', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
       buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
       buffer.flush();
@@ -36,7 +45,10 @@ void main() {
 
     test('startup buffering holds data until threshold met', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 100, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 100,
+        maxBufferMs: 15000,
       );
       buffer.addChunk(1000, Int16List.fromList(List.filled(100, 1)));
       final samples = buffer.pullSamples(100);
@@ -45,15 +57,22 @@ void main() {
 
     test('reports buffer depth in milliseconds', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(96000, 1))); // 1000ms at 48kHz stereo
+      buffer.addChunk(1000,
+          Int16List.fromList(List.filled(96000, 1))); // 1000ms at 48kHz stereo
       expect(buffer.bufferDepthMs, 1000);
     });
 
     test('drops oldest chunks when max buffer exceeded', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 10,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 10,
       );
       buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1))); // 10ms
       buffer.addChunk(2000, Int16List.fromList(List.filled(960, 2))); // 10ms
@@ -63,9 +82,13 @@ void main() {
 
     test('flush resets startup buffering requirement', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 100, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 100,
+        maxBufferMs: 15000,
       );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(96000, 1))); // exceed startup
+      buffer.addChunk(
+          1000, Int16List.fromList(List.filled(96000, 1))); // exceed startup
       final samples1 = buffer.pullSamples(10);
       expect(samples1.any((s) => s != 0), true);
       buffer.flush();
@@ -76,7 +99,10 @@ void main() {
 
     test('returns Int16List from pullSamples', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
       buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
       final samples = buffer.pullSamples(4);
@@ -85,7 +111,10 @@ void main() {
 
     test('partial chunk consumption advances offset correctly', () {
       final buffer = SendspinBuffer(
-        sampleRate: 48000, channels: 2, startupBufferMs: 0, maxBufferMs: 15000,
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
       );
       buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4, 5, 6]));
       final first = buffer.pullSamples(2);
@@ -171,7 +200,8 @@ void main() {
       expect(buffer.bufferDepthMs, 0);
     });
 
-    test('re-anchor cooldown: within 5 s falls through to micro-correction', () {
+    test('re-anchor cooldown: within 5 s falls through to micro-correction',
+        () {
       final buffer = makeBuffer();
       buffer.addChunk(0, Int16List(57600));
       buffer.pullSamples(pullSize);
@@ -210,7 +240,8 @@ void main() {
           reason: 'some frame-dropping correction should have occurred');
     });
 
-    test('output length always equals requested count regardless of correction', () {
+    test('output length always equals requested count regardless of correction',
+        () {
       final buffer = makeBuffer();
       buffer.addChunk(0, Int16List(96000));
       for (var i = 0; i < 30; i++) {
@@ -233,7 +264,8 @@ void main() {
       expect(result.length, pullSize);
       final nonZeroCount = result.where((s) => s == 7).length;
       expect(nonZeroCount, pullSize,
-          reason: 'all samples should be 7 (pulled or duplicated from last frame)');
+          reason:
+              'all samples should be 7 (pulled or duplicated from last frame)');
     });
 
     test('syncErrorUs getter reflects last computed error', () {

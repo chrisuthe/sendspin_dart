@@ -5,6 +5,7 @@ import 'dart:typed_data';
 class _AudioChunk implements Comparable<_AudioChunk> {
   final int timestampUs;
   Int16List samples;
+
   /// Offset into [samples] where unconsumed data begins.
   int offset;
 
@@ -218,15 +219,15 @@ class SendspinBuffer {
       final available = chunk.remaining;
 
       if (available <= remaining) {
-        result.setRange(written, written + available,
-            chunk.samples, chunk.offset);
+        result.setRange(
+            written, written + available, chunk.samples, chunk.offset);
         written += available;
         remaining -= available;
         _totalSamples -= available;
         _chunks.remove(chunk);
       } else {
-        result.setRange(written, written + remaining,
-            chunk.samples, chunk.offset);
+        result.setRange(
+            written, written + remaining, chunk.samples, chunk.offset);
         _totalSamples -= remaining;
         chunk.offset += remaining;
         written += remaining;

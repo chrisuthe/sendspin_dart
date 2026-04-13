@@ -8,7 +8,8 @@ import 'dart:typed_data';
 /// implementation consumes them and sends them to the hardware.
 abstract class AudioSink {
   /// Initialize the audio output with the given format.
-  Future<void> initialize({required int sampleRate, required int channels, required int bitDepth});
+  Future<void> initialize(
+      {required int sampleRate, required int channels, required int bitDepth});
 
   /// Start audio playback.
   Future<void> start();

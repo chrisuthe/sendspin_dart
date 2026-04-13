@@ -188,12 +188,14 @@ void main() {
         clientId: 'test-id',
         bufferSeconds: 5,
       );
-      final state = jsonDecode(client.buildClientState()) as Map<String, dynamic>;
+      final state =
+          jsonDecode(client.buildClientState()) as Map<String, dynamic>;
       expect(state['payload']['state'], 'synchronized');
       client.dispose();
     });
 
-    test('starts state report timer on stream/start and stops on stream/end', () async {
+    test('starts state report timer on stream/start and stops on stream/end',
+        () async {
       final client = SendspinClient(
         playerName: 'Test Player',
         clientId: 'test-id',

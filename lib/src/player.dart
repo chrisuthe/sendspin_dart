@@ -41,14 +41,14 @@ class SendspinPlayer {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
     this.codecFactory,
-  }) : bufferSeconds = bufferSeconds,
-       protocol = SendspinProtocol(
-         playerName: playerName,
-         clientId: clientId,
-         bufferSeconds: bufferSeconds,
-         deviceInfo: deviceInfo,
-         supportedFormats: supportedFormats,
-       ) {
+  })  : bufferSeconds = bufferSeconds,
+        protocol = SendspinProtocol(
+          playerName: playerName,
+          clientId: clientId,
+          bufferSeconds: bufferSeconds,
+          deviceInfo: deviceInfo,
+          supportedFormats: supportedFormats,
+        ) {
     _wireProtocol();
   }
 
@@ -60,8 +60,7 @@ class SendspinPlayer {
   Stream<SendspinPlayerState> get stateStream => protocol.stateStream;
 
   void Function(String message)? get onSendText => protocol.onSendText;
-  set onSendText(void Function(String message)? cb) =>
-      protocol.onSendText = cb;
+  set onSendText(void Function(String message)? cb) => protocol.onSendText = cb;
 
   void Function(double volume, bool muted)? get onVolumeChanged =>
       protocol.onVolumeChanged;
@@ -78,7 +77,8 @@ class SendspinPlayer {
   String buildClientState() => protocol.buildClientState();
 
   void handleTextMessage(String text) => protocol.handleTextMessage(text);
-  void handleBinaryMessage(Uint8List data) => protocol.handleBinaryMessage(data);
+  void handleBinaryMessage(Uint8List data) =>
+      protocol.handleBinaryMessage(data);
 
   void updateVolume(double volume) => protocol.updateVolume(volume);
 

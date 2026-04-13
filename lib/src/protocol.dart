@@ -151,8 +151,7 @@ class SendspinProtocol {
           'software_version': deviceInfo.softwareVersion,
         },
         'player@v1_support': {
-          'supported_formats':
-              supportedFormats.map((f) => f.toJson()).toList(),
+          'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
           'buffer_capacity': bufferSeconds * 48000 * 2 * 2, // bytes
           'supported_commands': ['volume', 'mute'],
         },
@@ -285,9 +284,8 @@ class SendspinProtocol {
       channels: channels,
       sampleRate: sampleRate,
       bitDepth: bitDepth,
-      codecHeader: (codecHeader != null && codecHeader.isNotEmpty)
-          ? codecHeader
-          : null,
+      codecHeader:
+          (codecHeader != null && codecHeader.isNotEmpty) ? codecHeader : null,
     ));
   }
 

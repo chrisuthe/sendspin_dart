@@ -62,8 +62,8 @@ class _FakeCodec implements SendspinCodec {
     // Treat raw bytes as 16-bit PCM.
     final sampleCount = encodedData.length ~/ 2;
     final samples = Int16List(sampleCount);
-    final view = ByteData.view(
-        encodedData.buffer, encodedData.offsetInBytes, encodedData.lengthInBytes);
+    final view = ByteData.view(encodedData.buffer, encodedData.offsetInBytes,
+        encodedData.lengthInBytes);
     for (int i = 0; i < sampleCount; i++) {
       samples[i] = view.getInt16(i * 2, Endian.little);
     }
@@ -231,7 +231,8 @@ void main() {
       expect(payload['name'], 'Test Player');
     });
 
-    test('track switch (second stream/start while streaming) flushes existing buffer',
+    test(
+        'track switch (second stream/start while streaming) flushes existing buffer',
         () {
       player.handleTextMessage(_serverHello());
       player.handleTextMessage(_streamStart(sampleRate: 48000));

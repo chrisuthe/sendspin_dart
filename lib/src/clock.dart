@@ -42,8 +42,9 @@ class SendspinClock {
 
   /// Estimated sync precision (1-sigma) in microseconds.
   /// Lower is better. Square root of the Kalman filter's offset covariance.
-  double get precisionUs =>
-      _offsetCovariance.isFinite ? sqrt(_offsetCovariance.abs()) : double.infinity;
+  double get precisionUs => _offsetCovariance.isFinite
+      ? sqrt(_offsetCovariance.abs())
+      : double.infinity;
 
   /// Number of time sync samples processed.
   int get sampleCount => _count;
@@ -91,8 +92,7 @@ class SendspinClock {
       _count++;
       _drift = (measurement.toDouble() - _offset) / dt;
       _offset = measurement.toDouble();
-      _driftCovariance =
-          (_offsetCovariance + measurementVariance) / dtSquared;
+      _driftCovariance = (_offsetCovariance + measurementVariance) / dtSquared;
       _offsetCovariance = measurementVariance;
       return;
     }
@@ -141,8 +141,7 @@ class SendspinClock {
         newDriftCovariance - driftGain * newOffsetDriftCovariance;
     _offsetDriftCovariance =
         newOffsetDriftCovariance - driftGain * newOffsetCovariance;
-    _offsetCovariance =
-        newOffsetCovariance - offsetGain * newOffsetCovariance;
+    _offsetCovariance = newOffsetCovariance - offsetGain * newOffsetCovariance;
 
     // Drift significance check (SNR)
     final double driftSquared = _drift * _drift;
@@ -161,7 +160,8 @@ class SendspinClock {
   /// Converts a server timestamp to the equivalent client timestamp.
   int computeClientTime(int serverTime) {
     final double effectiveDrift = _useDrift ? _drift : 0.0;
-    return ((serverTime.toDouble() - _offset +
+    return ((serverTime.toDouble() -
+                _offset +
                 effectiveDrift * _lastUpdate.toDouble()) /
             (1.0 + effectiveDrift))
         .round();

@@ -24,17 +24,22 @@ class PcmCodec implements SendspinCodec {
   final int channels;
   final int sampleRate;
 
-  PcmCodec({required this.bitDepth, required this.channels, required this.sampleRate});
+  PcmCodec(
+      {required this.bitDepth,
+      required this.channels,
+      required this.sampleRate});
 
   @override
   Int16List decode(Uint8List encodedData) {
     if (encodedData.isEmpty) return _emptyInt16List;
-    final view = ByteData.view(encodedData.buffer, encodedData.offsetInBytes, encodedData.lengthInBytes);
+    final view = ByteData.view(encodedData.buffer, encodedData.offsetInBytes,
+        encodedData.lengthInBytes);
 
     switch (bitDepth) {
       case 16:
         final sampleCount = encodedData.length ~/ 2;
-        if (encodedData.offsetInBytes % 2 == 0 && Endian.host == Endian.little) {
+        if (encodedData.offsetInBytes % 2 == 0 &&
+            Endian.host == Endian.little) {
           // Zero-copy: reinterpret the underlying byte buffer as Int16List.
           return Int16List.sublistView(encodedData, 0, sampleCount * 2);
         }
@@ -48,7 +53,9 @@ class PcmCodec implements SendspinCodec {
         final samples = Int16List(sampleCount);
         for (int i = 0; i < sampleCount; i++) {
           final offset = i * 3;
-          var value = encodedData[offset] | (encodedData[offset + 1] << 8) | (encodedData[offset + 2] << 16);
+          var value = encodedData[offset] |
+              (encodedData[offset + 1] << 8) |
+              (encodedData[offset + 2] << 16);
           if (value & 0x800000 != 0) value |= 0xFF000000;
           // Truncate 24-bit to 16-bit (keep upper bits for best fidelity).
           samples[i] = value >> 8;
@@ -89,7 +96,8 @@ SendspinCodec createCodec({
 }) {
   switch (codec) {
     case 'pcm':
-      return PcmCodec(bitDepth: bitDepth, channels: channels, sampleRate: sampleRate);
+      return PcmCodec(
+          bitDepth: bitDepth, channels: channels, sampleRate: sampleRate);
     default:
       throw ArgumentError('Unsupported codec: $codec. '
           'Only "pcm" is built-in. For FLAC, provide a custom SendspinCodec.');

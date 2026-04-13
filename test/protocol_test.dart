@@ -184,7 +184,8 @@ void main() {
       expect(clearCalled, isTrue);
     });
 
-    test('emits onStreamEnd on stream/end and transitions to syncing', () async {
+    test('emits onStreamEnd on stream/end and transitions to syncing',
+        () async {
       var endCalled = false;
       protocol.onStreamEnd = () => endCalled = true;
 
