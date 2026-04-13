@@ -1,0 +1,5 @@
+# Internal implementation plans — not user-facing documentation
+docs/
+
+# CI and workflow configuration
+.github/
