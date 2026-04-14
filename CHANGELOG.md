@@ -1,3 +1,24 @@
+## 0.0.2
+
+### Spec compliance
+
+- Send `client/goodbye` via new `sendGoodbye()` API with `SendspinGoodbyeReason` enum.
+- Wire `set_static_delay` from protocol through to the jitter buffer so server-commanded delay actually affects playback timing.
+- Accept `initialStaticDelayMs` in the constructor and expose `onStaticDelayChanged` so consumer apps can persist the value across reboots.
+- Emit `client/state` with `state: "error"` on sustained buffer underrun, and recover to `"synchronized"` when audio resumes.
+- Filter binary frames by message type (player range 4–7); drop artwork/visualizer frames instead of mis-routing them. `AudioFrame` now carries a required `type` field.
+- Compute `buffer_capacity` in `client/hello` from the largest advertised `supportedFormats` entry rather than a hardcoded 48k/stereo/16-bit value.
+
+### New observability
+
+- Parse `connection_reason` and `active_roles` from `server/hello`; exposed on `SendspinPlayerState`.
+- Handle `group/update` messages with delta merge; adds `SendspinGroupState`, `SendspinGroupPlaybackState`, and `onGroupUpdate` callback.
+- Parse `server/state` metadata and controller sub-objects; adds `SendspinMetadata`, `SendspinMetadataProgress`, `SendspinControllerInfo`, `SendspinRepeatMode`, plus `onMetadataUpdate` and `onControllerUpdate` callbacks.
+
+### Docs
+
+- README section documenting that mDNS discovery (`_sendspin._tcp.local.`) is intentionally left to consumer apps.
+
 ## 0.0.1
 
 - Initial release
