@@ -149,7 +149,7 @@ void main() {
 
       final data = Uint8List(13);
       final view = ByteData.view(data.buffer);
-      data[0] = 1; // version
+      data[0] = 4; // message type: player audio frame
       view.setInt64(1, 123456789, Endian.big);
       data[9] = 0x01;
       data[10] = 0x02;
@@ -273,7 +273,7 @@ void main() {
     test('parseBinaryFrame is a static utility', () {
       final frame = Uint8List(13);
       final view = ByteData.view(frame.buffer);
-      frame[0] = 1;
+      frame[0] = 4;
       view.setInt64(1, 987654321, Endian.big);
       frame[9] = 0xAA;
       frame[10] = 0xBB;
@@ -530,6 +530,103 @@ void main() {
       protocol.resetForNewConnection();
       // State should still be accessible
       expect(protocol.state, isNotNull);
+    });
+
+    Uint8List buildTypedFrame(int type, int timestampUs, List<int> payload) {
+      final frame = Uint8List(9 + payload.length);
+      frame[0] = type;
+      ByteData.view(frame.buffer).setInt64(1, timestampUs, Endian.big);
+      frame.setRange(9, frame.length, payload);
+      return frame;
+    }
+
+    test('parseBinaryFrame extracts the type byte', () {
+      final frame = buildTypedFrame(4, 111222333, [0xDE, 0xAD]);
+      final parsed = SendspinProtocol.parseBinaryFrame(frame);
+      expect(parsed.type, 4);
+      expect(parsed.timestampUs, 111222333);
+      expect(parsed.audioData, [0xDE, 0xAD]);
+    });
+
+    test('handleBinaryMessage emits onAudioFrame for player type 4', () {
+      AudioFrame? received;
+      protocol.onAudioFrame = (f) => received = f;
+      protocol.handleBinaryMessage(buildTypedFrame(4, 1, [0x01]));
+      expect(received, isNotNull);
+      expect(received!.type, 4);
+    });
+
+    test('handleBinaryMessage emits onAudioFrame for player type 7', () {
+      AudioFrame? received;
+      protocol.onAudioFrame = (f) => received = f;
+      protocol.handleBinaryMessage(buildTypedFrame(7, 1, [0x01]));
+      expect(received, isNotNull);
+      expect(received!.type, 7);
+    });
+
+    test('handleBinaryMessage drops artwork frame type 8', () {
+      AudioFrame? received;
+      protocol.onAudioFrame = (f) => received = f;
+      protocol.handleBinaryMessage(buildTypedFrame(8, 1, [0x01]));
+      expect(received, isNull);
+    });
+
+    test('handleBinaryMessage drops reserved type 0', () {
+      AudioFrame? received;
+      protocol.onAudioFrame = (f) => received = f;
+      protocol.handleBinaryMessage(buildTypedFrame(0, 1, [0x01]));
+      expect(received, isNull);
+    });
+
+    test('buildClientHello buffer_capacity uses 48k stereo 16-bit default', () {
+      final p = SendspinProtocol(
+        playerName: 'p',
+        clientId: 'c',
+        bufferSeconds: 5,
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final support =
+          (parsed['payload']['player@v1_support']) as Map<String, dynamic>;
+      expect(support['buffer_capacity'], 5 * 48000 * 2 * 2);
+      p.dispose();
+    });
+
+    test('buildClientHello buffer_capacity uses 24-bit with 3 bytes/sample',
+        () {
+      final p = SendspinProtocol(
+        playerName: 'p',
+        clientId: 'c',
+        bufferSeconds: 5,
+        supportedFormats: const [
+          AudioFormat(
+              codec: 'pcm', channels: 2, sampleRate: 48000, bitDepth: 24),
+        ],
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final support =
+          (parsed['payload']['player@v1_support']) as Map<String, dynamic>;
+      expect(support['buffer_capacity'], 5 * 48000 * 2 * 3);
+      p.dispose();
+    });
+
+    test('buildClientHello buffer_capacity picks max of advertised formats',
+        () {
+      final p = SendspinProtocol(
+        playerName: 'p',
+        clientId: 'c',
+        bufferSeconds: 2,
+        supportedFormats: const [
+          AudioFormat(
+              codec: 'pcm', channels: 2, sampleRate: 48000, bitDepth: 16),
+          AudioFormat(
+              codec: 'pcm', channels: 2, sampleRate: 96000, bitDepth: 24),
+        ],
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final support =
+          (parsed['payload']['player@v1_support']) as Map<String, dynamic>;
+      expect(support['buffer_capacity'], 2 * 96000 * 2 * 3);
+      p.dispose();
     });
   });
 }

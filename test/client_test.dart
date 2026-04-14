@@ -233,7 +233,7 @@ void main() {
     test('parseBinaryFrame extracts timestamp and data', () {
       final frame = Uint8List(13);
       final view = ByteData.view(frame.buffer);
-      frame[0] = 1;
+      frame[0] = 4;
       view.setInt64(1, 123456789, Endian.big);
       frame[9] = 0x01;
       frame[10] = 0x02;

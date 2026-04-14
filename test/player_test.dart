@@ -54,7 +54,7 @@ String _setStaticDelay(int delayMs) => jsonEncode({
 Uint8List _binaryFrame(int timestampUs, Int16List pcmSamples) {
   final audioBytes = Uint8List.view(pcmSamples.buffer);
   final frame = Uint8List(9 + audioBytes.length);
-  frame[0] = 1; // version
+  frame[0] = 4; // message type: player audio frame
   final view = ByteData.view(frame.buffer);
   view.setInt64(1, timestampUs, Endian.big);
   frame.setRange(9, frame.length, audioBytes);

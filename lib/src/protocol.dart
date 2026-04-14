@@ -16,12 +16,22 @@ enum SendspinGoodbyeReason {
   const SendspinGoodbyeReason(this.wireValue);
 }
 
+/// Binary frame type IDs per Sendspin spec. Player frames are type 4
+/// (bits 000001_xx). Artwork is 8-11, visualizer is 16-23.
+const int _binaryTypePlayerMin = 4;
+const int _binaryTypePlayerMax = 7;
+
 /// A parsed binary audio frame from the Sendspin protocol.
 class AudioFrame {
+  final int type;
   final int timestampUs;
   final Uint8List audioData;
 
-  const AudioFrame({required this.timestampUs, required this.audioData});
+  const AudioFrame({
+    required this.type,
+    required this.timestampUs,
+    required this.audioData,
+  });
 }
 
 /// Device info sent in the client/hello handshake.
@@ -174,11 +184,22 @@ class SendspinProtocol {
         },
         'player@v1_support': {
           'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
-          'buffer_capacity': bufferSeconds * 48000 * 2 * 2, // bytes
+          'buffer_capacity': _computeBufferCapacityBytes(),
           'supported_commands': ['volume', 'mute'],
         },
       },
     });
+  }
+
+  int _computeBufferCapacityBytes() {
+    if (supportedFormats.isEmpty) return bufferSeconds * 48000 * 2 * 2;
+    int maxBps = 0;
+    for (final f in supportedFormats) {
+      final bytesPerSample = (f.bitDepth + 7) ~/ 8;
+      final bps = f.channels * f.sampleRate * bytesPerSample;
+      if (bps > maxBps) maxBps = bps;
+    }
+    return bufferSeconds * maxBps;
   }
 
   /// Builds a client/time message for clock synchronization.
@@ -395,25 +416,32 @@ class SendspinProtocol {
 
   /// Handles an incoming binary audio frame.
   ///
-  /// Parses the frame and emits it via [onAudioFrame]. Does not decode or
-  /// buffer — that is the player layer's responsibility.
+  /// Parses the frame and emits it via [onAudioFrame] only if the frame is
+  /// a player-range type (4-7). Non-player frames (artwork, visualizer) are
+  /// silently dropped. Does not decode or buffer — that is the player layer's
+  /// responsibility.
   void handleBinaryMessage(Uint8List data) {
     if (data.length < 9) {
       return;
     }
-
     final frame = parseBinaryFrame(data);
+    if (frame.type < _binaryTypePlayerMin ||
+        frame.type > _binaryTypePlayerMax) {
+      return;
+    }
     onAudioFrame?.call(frame);
   }
 
-  /// Parses a binary frame: byte 0 = version, bytes 1-8 = BE int64 timestamp,
-  /// bytes 9+ = audio data.
+  /// Parses a binary frame: byte 0 = message type, bytes 1-8 = BE int64
+  /// timestamp, bytes 9+ = audio data.
   static AudioFrame parseBinaryFrame(Uint8List frame) {
     final view =
         ByteData.view(frame.buffer, frame.offsetInBytes, frame.lengthInBytes);
+    final type = view.getUint8(0);
     final timestampUs = view.getInt64(1, Endian.big);
     final audioData = Uint8List.sublistView(frame, 9);
-    return AudioFrame(timestampUs: timestampUs, audioData: audioData);
+    return AudioFrame(
+        type: type, timestampUs: timestampUs, audioData: audioData);
   }
 
   // -------------------------------------------------------------------------

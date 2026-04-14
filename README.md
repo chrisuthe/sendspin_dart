@@ -138,6 +138,20 @@ Client                          Server
   |--- client/state ------------->|   Acknowledge new state
 ```
 
+## Discovery (mDNS)
+
+The Sendspin spec recommends advertising players via mDNS on
+`_sendspin._tcp.local.` (port 8928) and/or discovering servers on
+`_sendspin-server._tcp.local.` (port 8927). This library does not ship
+any mDNS implementation -- discovery is intentionally left to the consumer
+app, since platform-appropriate mDNS stacks differ between Flutter,
+CLI, and server-side Dart.
+
+For Flutter apps, packages like `multicast_dns` or `nsd` work well. Once
+you have a server URL, pass it to your WebSocket transport and feed
+incoming messages through `SendspinClient.handleTextMessage` and
+`handleBinaryMessage` as shown above.
+
 ## License
 
 MIT
