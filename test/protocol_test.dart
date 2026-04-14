@@ -44,6 +44,70 @@ void main() {
       expect(protocol.state.serverName, 'Music Assistant');
     });
 
+    test('server/hello with connection_reason playback', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {'name': 'MA', 'connection_reason': 'playback'},
+      }));
+      expect(
+          protocol.state.connectionReason, SendspinConnectionReason.playback);
+    });
+
+    test('server/hello with connection_reason discovery', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {'name': 'MA', 'connection_reason': 'discovery'},
+      }));
+      expect(
+          protocol.state.connectionReason, SendspinConnectionReason.discovery);
+    });
+
+    test('server/hello with no connection_reason defaults to unknown', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {'name': 'MA'},
+      }));
+      expect(protocol.state.connectionReason, SendspinConnectionReason.unknown);
+    });
+
+    test('server/hello with bogus connection_reason falls back to unknown', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {'name': 'MA', 'connection_reason': 'bogus'},
+      }));
+      expect(protocol.state.connectionReason, SendspinConnectionReason.unknown);
+    });
+
+    test('server/hello parses active_roles', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {
+          'name': 'MA',
+          'active_roles': ['player@v1'],
+        },
+      }));
+      expect(protocol.state.activeRoles, ['player@v1']);
+    });
+
+    test('server/hello with no active_roles defaults to empty list', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {'name': 'MA'},
+      }));
+      expect(protocol.state.activeRoles, <String>[]);
+    });
+
+    test('server/hello filters non-string entries from active_roles', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/hello',
+        'payload': {
+          'name': 'MA',
+          'active_roles': ['player@v1', 42],
+        },
+      }));
+      expect(protocol.state.activeRoles, ['player@v1']);
+    });
+
     test('builds correct client/hello message', () {
       final protocol = SendspinProtocol(
         playerName: 'Kitchen Display',

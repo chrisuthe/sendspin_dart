@@ -298,10 +298,17 @@ class SendspinProtocol {
 
   void _handleServerHello(Map<String, dynamic> payload) {
     final serverName = payload['name'] as String? ?? 'Unknown';
+    final connectionReason = SendspinConnectionReason.fromWire(
+        payload['connection_reason'] as String?);
+    final activeRoles =
+        (payload['active_roles'] as List?)?.whereType<String>().toList() ??
+            const <String>[];
 
     _updateState(_state.copyWith(
       connectionState: SendspinConnectionState.syncing,
       serverName: serverName,
+      connectionReason: connectionReason,
+      activeRoles: activeRoles,
     ));
 
     // Send initial state report, then start clock sync.

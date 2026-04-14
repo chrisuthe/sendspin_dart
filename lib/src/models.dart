@@ -1,3 +1,21 @@
+/// Reason a Sendspin server initiated (or accepted) a connection.
+/// Used to prioritize between multiple servers during discovery.
+enum SendspinConnectionReason {
+  discovery('discovery'),
+  playback('playback'),
+  unknown('unknown');
+
+  final String wireValue;
+  const SendspinConnectionReason(this.wireValue);
+
+  static SendspinConnectionReason fromWire(String? value) {
+    for (final r in SendspinConnectionReason.values) {
+      if (r.wireValue == value) return r;
+    }
+    return SendspinConnectionReason.unknown;
+  }
+}
+
 /// Connection states for the Sendspin player lifecycle.
 enum SendspinConnectionState {
   disabled,
@@ -21,6 +39,8 @@ class SendspinPlayerState {
   final int clockOffsetMs;
   final int clockSamples;
   final int staticDelayMs;
+  final SendspinConnectionReason connectionReason;
+  final List<String> activeRoles;
 
   const SendspinPlayerState({
     this.connectionState = SendspinConnectionState.disabled,
@@ -34,6 +54,8 @@ class SendspinPlayerState {
     this.clockOffsetMs = 0,
     this.clockSamples = 0,
     this.staticDelayMs = 0,
+    this.connectionReason = SendspinConnectionReason.unknown,
+    this.activeRoles = const <String>[],
   });
 
   bool get isActive =>
@@ -53,6 +75,8 @@ class SendspinPlayerState {
     int? clockOffsetMs,
     int? clockSamples,
     int? staticDelayMs,
+    SendspinConnectionReason? connectionReason,
+    List<String>? activeRoles,
   }) {
     return SendspinPlayerState(
       connectionState: connectionState ?? this.connectionState,
@@ -66,6 +90,8 @@ class SendspinPlayerState {
       clockOffsetMs: clockOffsetMs ?? this.clockOffsetMs,
       clockSamples: clockSamples ?? this.clockSamples,
       staticDelayMs: staticDelayMs ?? this.staticDelayMs,
+      connectionReason: connectionReason ?? this.connectionReason,
+      activeRoles: activeRoles ?? this.activeRoles,
     );
   }
 }
