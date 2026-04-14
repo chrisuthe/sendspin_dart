@@ -48,6 +48,13 @@ class SendspinBuffer {
   bool _startupMet = false;
   int _staticDelayMs = 0;
 
+  bool _hasProducedAudio = false;
+  bool _inUnderrun = false;
+
+  /// True once a pull has returned silence after real audio started flowing.
+  /// Cleared when a subsequent pull returns real data.
+  bool get isInUnderrun => _inUnderrun;
+
   /// Sets the static delay in milliseconds for multi-room sync.
   ///
   /// The delay offsets when samples become eligible for playback, effectively
@@ -116,7 +123,11 @@ class SendspinBuffer {
   /// - **Re-anchor** (> 500ms): flush the buffer and restart playback
   ///   tracking (with a 5-second cooldown).
   Int16List pullSamples(int count) {
-    if (!_startupMet || _chunks.isEmpty) {
+    if (!_startupMet) {
+      return Int16List(count);
+    }
+    if (_chunks.isEmpty) {
+      if (_hasProducedAudio) _inUnderrun = true;
       return Int16List(count);
     }
 
@@ -183,10 +194,15 @@ class SendspinBuffer {
     _playbackPositionUs += frameDurationUs;
 
     if (rawSamples.length == count) {
+      _hasProducedAudio = true;
+      _inUnderrun = false;
       return rawSamples;
     } else if (rawSamples.length > count) {
+      _hasProducedAudio = true;
+      _inUnderrun = false;
       return Int16List.sublistView(rawSamples, 0, count);
     } else {
+      if (_hasProducedAudio) _inUnderrun = true;
       // Need to expand: duplicate last frame or pad with silence.
       final result = Int16List(count);
       result.setRange(0, rawSamples.length, rawSamples);
@@ -247,6 +263,8 @@ class SendspinBuffer {
     _playbackPositionUs = 0;
     _correctionAccumulator = 0.0;
     _lastSyncErrorUs = 0;
+    _hasProducedAudio = false;
+    _inUnderrun = false;
   }
 
   /// Drop oldest chunks until the buffer is within [maxBufferMs].

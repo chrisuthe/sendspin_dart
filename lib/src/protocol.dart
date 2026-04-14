@@ -5,6 +5,17 @@ import 'dart:typed_data';
 import 'models.dart';
 import 'clock.dart';
 
+/// Reason codes for the client/goodbye message (Sendspin spec).
+enum SendspinGoodbyeReason {
+  anotherServer('another_server'),
+  shutdown('shutdown'),
+  restart('restart'),
+  userRequest('user_request');
+
+  final String wireValue;
+  const SendspinGoodbyeReason(this.wireValue);
+}
+
 /// A parsed binary audio frame from the Sendspin protocol.
 class AudioFrame {
   final int timestampUs;
@@ -64,6 +75,7 @@ class SendspinProtocol {
   final SendspinClock _clock = SendspinClock();
 
   int _staticDelayMs = 0;
+  bool _pipelineError = false;
 
   SendspinPlayerState _state = const SendspinPlayerState();
   final StreamController<SendspinPlayerState> _stateController =
@@ -94,6 +106,9 @@ class SendspinProtocol {
   /// Called when the server changes volume or mute via server/command.
   void Function(double volume, bool muted)? onVolumeChanged;
 
+  /// Called when the server updates the static delay via server/command.
+  void Function(int delayMs)? onStaticDelayChanged;
+
   SendspinProtocol({
     required this.playerName,
     required this.clientId,
@@ -103,7 +118,11 @@ class SendspinProtocol {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 48000, bitDepth: 16),
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
-  });
+    int initialStaticDelayMs = 0,
+  }) {
+    _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
+    _state = _state.copyWith(staticDelayMs: _staticDelayMs);
+  }
 
   // -------------------------------------------------------------------------
   // Public getters
@@ -117,6 +136,9 @@ class SendspinProtocol {
 
   /// Stream of state changes.
   Stream<SendspinPlayerState> get stateStream => _stateController.stream;
+
+  /// Current static delay in milliseconds (set by server/command).
+  int get staticDelayMs => _staticDelayMs;
 
   // -------------------------------------------------------------------------
   // State management
@@ -174,7 +196,7 @@ class SendspinProtocol {
     return jsonEncode({
       'type': 'client/state',
       'payload': {
-        'state': 'synchronized',
+        'state': _pipelineError ? 'error' : 'synchronized',
         'player': {
           'volume': (_state.volume * 100).round(),
           'muted': _state.muted,
@@ -183,6 +205,34 @@ class SendspinProtocol {
         },
       },
     });
+  }
+
+  /// Builds a client/goodbye message with the given reason.
+  String buildClientGoodbye(SendspinGoodbyeReason reason) {
+    return jsonEncode({
+      'type': 'client/goodbye',
+      'payload': {
+        'reason': reason.wireValue,
+      },
+    });
+  }
+
+  /// Sends a client/goodbye message via [onSendText].
+  ///
+  /// The consumer remains responsible for closing the underlying transport
+  /// after this returns.
+  void sendGoodbye(SendspinGoodbyeReason reason) {
+    onSendText?.call(buildClientGoodbye(reason));
+  }
+
+  /// Sets the pipeline error flag and immediately reports state if changed.
+  ///
+  /// Per spec, clients mute output on `state: 'error'` and resume on
+  /// `state: 'synchronized'` once sync is restored.
+  void setPipelineError(bool error) {
+    if (_pipelineError == error) return;
+    _pipelineError = error;
+    onSendText?.call(buildClientState());
   }
 
   /// Update volume from local UI and report to server.
@@ -330,6 +380,7 @@ class SendspinProtocol {
           _staticDelayMs = delayMs.clamp(0, 5000);
           _updateState(_state.copyWith(staticDelayMs: _staticDelayMs));
           onSendText?.call(buildClientState());
+          onStaticDelayChanged?.call(_staticDelayMs);
         }
     }
   }

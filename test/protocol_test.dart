@@ -322,6 +322,209 @@ void main() {
       expect(receivedVolume, 1.0);
     });
 
+    test('handles set_static_delay command and invokes callback', () async {
+      int? receivedDelay;
+      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/command',
+        'payload': {
+          'player': {'command': 'set_static_delay', 'static_delay_ms': 250},
+        },
+      }));
+
+      await Future.delayed(Duration.zero);
+      expect(receivedDelay, 250);
+      expect(protocol.staticDelayMs, 250);
+      expect(protocol.state.staticDelayMs, 250);
+    });
+
+    test('clamps set_static_delay above max to 5000', () async {
+      int? receivedDelay;
+      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/command',
+        'payload': {
+          'player': {'command': 'set_static_delay', 'static_delay_ms': 99999},
+        },
+      }));
+
+      await Future.delayed(Duration.zero);
+      expect(receivedDelay, 5000);
+      expect(protocol.staticDelayMs, 5000);
+    });
+
+    test('clamps negative set_static_delay to 0', () async {
+      int? receivedDelay;
+      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/command',
+        'payload': {
+          'player': {'command': 'set_static_delay', 'static_delay_ms': -100},
+        },
+      }));
+
+      await Future.delayed(Duration.zero);
+      expect(receivedDelay, 0);
+      expect(protocol.staticDelayMs, 0);
+    });
+
+    test('staticDelayMs getter reflects latest value across updates', () {
+      expect(protocol.staticDelayMs, 0);
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/command',
+        'payload': {
+          'player': {'command': 'set_static_delay', 'static_delay_ms': 100},
+        },
+      }));
+      expect(protocol.staticDelayMs, 100);
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/command',
+        'payload': {
+          'player': {'command': 'set_static_delay', 'static_delay_ms': 500},
+        },
+      }));
+      expect(protocol.staticDelayMs, 500);
+    });
+
+    test('initialStaticDelayMs sets staticDelayMs at construction', () {
+      final p = SendspinProtocol(
+        playerName: 'Test',
+        clientId: 'id',
+        bufferSeconds: 5,
+        initialStaticDelayMs: 1500,
+      );
+      expect(p.staticDelayMs, 1500);
+      p.dispose();
+    });
+
+    test('initialStaticDelayMs is reflected in buildClientState', () {
+      final p = SendspinProtocol(
+        playerName: 'Test',
+        clientId: 'id',
+        bufferSeconds: 5,
+        initialStaticDelayMs: 1500,
+      );
+      final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
+      expect(
+        (parsed['payload']['player'] as Map)['static_delay_ms'],
+        1500,
+      );
+      p.dispose();
+    });
+
+    test('initialStaticDelayMs above max is clamped to 5000', () {
+      final p = SendspinProtocol(
+        playerName: 'Test',
+        clientId: 'id',
+        bufferSeconds: 5,
+        initialStaticDelayMs: 99999,
+      );
+      expect(p.staticDelayMs, 5000);
+      p.dispose();
+    });
+
+    test('negative initialStaticDelayMs is clamped to 0', () {
+      final p = SendspinProtocol(
+        playerName: 'Test',
+        clientId: 'id',
+        bufferSeconds: 5,
+        initialStaticDelayMs: -50,
+      );
+      expect(p.staticDelayMs, 0);
+      p.dispose();
+    });
+
+    test('buildClientState defaults to synchronized', () {
+      final parsed =
+          jsonDecode(protocol.buildClientState()) as Map<String, dynamic>;
+      expect(parsed['payload']['state'], 'synchronized');
+    });
+
+    test('setPipelineError(true) flips buildClientState to error', () {
+      protocol.onSendText = (_) {};
+      protocol.setPipelineError(true);
+      final parsed =
+          jsonDecode(protocol.buildClientState()) as Map<String, dynamic>;
+      expect(parsed['payload']['state'], 'error');
+    });
+
+    test('setPipelineError(true) emits client/state via onSendText', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.setPipelineError(true);
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      expect(parsed['type'], 'client/state');
+      expect(parsed['payload']['state'], 'error');
+    });
+
+    test('setPipelineError is idempotent when repeated', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.setPipelineError(true);
+      protocol.setPipelineError(true);
+      expect(sent, hasLength(1));
+    });
+
+    test('setPipelineError(false) after error sends synchronized report', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.setPipelineError(true);
+      protocol.setPipelineError(false);
+      expect(sent, hasLength(2));
+      final recovered = jsonDecode(sent[1]) as Map<String, dynamic>;
+      expect(recovered['payload']['state'], 'synchronized');
+    });
+
+    test('buildClientGoodbye returns correct JSON for shutdown', () {
+      final msg = protocol.buildClientGoodbye(SendspinGoodbyeReason.shutdown);
+      final parsed = jsonDecode(msg) as Map<String, dynamic>;
+      expect(parsed['type'], 'client/goodbye');
+      expect((parsed['payload'] as Map)['reason'], 'shutdown');
+    });
+
+    test('buildClientGoodbye maps anotherServer to another_server', () {
+      final msg =
+          protocol.buildClientGoodbye(SendspinGoodbyeReason.anotherServer);
+      final parsed = jsonDecode(msg) as Map<String, dynamic>;
+      expect((parsed['payload'] as Map)['reason'], 'another_server');
+    });
+
+    test('buildClientGoodbye maps restart to restart', () {
+      final msg = protocol.buildClientGoodbye(SendspinGoodbyeReason.restart);
+      final parsed = jsonDecode(msg) as Map<String, dynamic>;
+      expect((parsed['payload'] as Map)['reason'], 'restart');
+    });
+
+    test('buildClientGoodbye maps userRequest to user_request', () {
+      final msg =
+          protocol.buildClientGoodbye(SendspinGoodbyeReason.userRequest);
+      final parsed = jsonDecode(msg) as Map<String, dynamic>;
+      expect((parsed['payload'] as Map)['reason'], 'user_request');
+    });
+
+    test('sendGoodbye dispatches built JSON via onSendText', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.sendGoodbye(SendspinGoodbyeReason.shutdown);
+      expect(sent, hasLength(1));
+      expect(
+        sent.first,
+        protocol.buildClientGoodbye(SendspinGoodbyeReason.shutdown),
+      );
+    });
+
+    test('sendGoodbye with null onSendText does not throw', () {
+      protocol.onSendText = null;
+      expect(() => protocol.sendGoodbye(SendspinGoodbyeReason.userRequest),
+          returnsNormally);
+    });
+
     test('resetForNewConnection stops timers and resets clock', () {
       // Should not throw
       protocol.resetForNewConnection();

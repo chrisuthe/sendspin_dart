@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -30,6 +31,9 @@ class SendspinPlayer {
 
   SendspinCodec? _codec;
   SendspinBuffer? _buffer;
+  Timer? _underrunPollTimer;
+
+  void Function(int delayMs)? _userOnStaticDelayChanged;
 
   SendspinPlayer({
     required String playerName,
@@ -41,6 +45,7 @@ class SendspinPlayer {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
     this.codecFactory,
+    int initialStaticDelayMs = 0,
   })  : bufferSeconds = bufferSeconds,
         protocol = SendspinProtocol(
           playerName: playerName,
@@ -48,6 +53,7 @@ class SendspinPlayer {
           bufferSeconds: bufferSeconds,
           deviceInfo: deviceInfo,
           supportedFormats: supportedFormats,
+          initialStaticDelayMs: initialStaticDelayMs,
         ) {
     _wireProtocol();
   }
@@ -67,6 +73,13 @@ class SendspinPlayer {
   set onVolumeChanged(void Function(double volume, bool muted)? cb) =>
       protocol.onVolumeChanged = cb;
 
+  int get staticDelayMs => protocol.staticDelayMs;
+
+  void Function(int delayMs)? get onStaticDelayChanged =>
+      _userOnStaticDelayChanged;
+  set onStaticDelayChanged(void Function(int delayMs)? cb) =>
+      _userOnStaticDelayChanged = cb;
+
   // ---------------------------------------------------------------------------
   // Delegated methods
   // ---------------------------------------------------------------------------
@@ -75,6 +88,12 @@ class SendspinPlayer {
   String buildClientTime(int clientTransmittedUs) =>
       protocol.buildClientTime(clientTransmittedUs);
   String buildClientState() => protocol.buildClientState();
+
+  String buildClientGoodbye(SendspinGoodbyeReason reason) =>
+      protocol.buildClientGoodbye(reason);
+
+  void sendGoodbye(SendspinGoodbyeReason reason) =>
+      protocol.sendGoodbye(reason);
 
   void handleTextMessage(String text) => protocol.handleTextMessage(text);
   void handleBinaryMessage(Uint8List data) =>
@@ -103,6 +122,8 @@ class SendspinPlayer {
   /// timers.
   void resetForNewConnection() {
     protocol.resetForNewConnection();
+    _underrunPollTimer?.cancel();
+    _underrunPollTimer = null;
     _codec?.dispose();
     _codec = null;
     _buffer?.flush();
@@ -111,6 +132,8 @@ class SendspinPlayer {
 
   /// Cleans up codec and protocol resources.
   void dispose() {
+    _underrunPollTimer?.cancel();
+    _underrunPollTimer = null;
     _codec?.dispose();
     _codec = null;
     _buffer = null;
@@ -126,6 +149,10 @@ class SendspinPlayer {
     protocol.onAudioFrame = _handleAudioFrame;
     protocol.onStreamClear = _handleStreamClear;
     protocol.onStreamEnd = _handleStreamEnd;
+    protocol.onStaticDelayChanged = (delayMs) {
+      _buffer?.staticDelayMs = delayMs;
+      _userOnStaticDelayChanged?.call(delayMs);
+    };
   }
 
   void _handleStreamConfig(StreamConfig config) {
@@ -166,8 +193,18 @@ class SendspinPlayer {
         maxBufferMs: bufferSeconds * 1000,
       );
     }
+    _buffer!.staticDelayMs = protocol.staticDelayMs;
+
+    _underrunPollTimer ??= Timer.periodic(
+        const Duration(milliseconds: 500), (_) => _checkUnderrun());
 
     onStreamStart?.call(config.sampleRate, config.channels, config.bitDepth);
+  }
+
+  void _checkUnderrun() {
+    final buf = _buffer;
+    if (buf == null) return;
+    protocol.setPipelineError(buf.isInUnderrun);
   }
 
   void _handleAudioFrame(AudioFrame frame) {
@@ -184,6 +221,9 @@ class SendspinPlayer {
   }
 
   void _handleStreamEnd() {
+    _underrunPollTimer?.cancel();
+    _underrunPollTimer = null;
+    protocol.setPipelineError(false);
     onStreamStop?.call();
     _buffer?.flush();
     _codec?.dispose();

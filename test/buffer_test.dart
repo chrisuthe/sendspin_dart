@@ -109,6 +109,99 @@ void main() {
       expect(samples, isA<Int16List>());
     });
 
+    test('isInUnderrun false before any real audio produced', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.pullSamples(4);
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
+    test('isInUnderrun false after a successful real-audio pull', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
+    test('isInUnderrun becomes true after exhausting the buffer', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isFalse);
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isTrue);
+    });
+
+    test('isInUnderrun clears when fresh audio arrives after underrun', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
+      buffer.pullSamples(960);
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isTrue);
+      buffer.addChunk(2000, Int16List.fromList(List.filled(960, 2)));
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
+    test('flush resets isInUnderrun flag', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
+      buffer.pullSamples(960);
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isTrue);
+      buffer.flush();
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
+    test('static-delay hold does not flag isInUnderrun', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 0,
+        maxBufferMs: 15000,
+      );
+      buffer.staticDelayMs = 1000; // 96000 samples needed
+      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
+      final result = buffer.pullSamples(960);
+      expect(result, Int16List(960));
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
+    test('pre-startup silence does not flag isInUnderrun', () {
+      final buffer = SendspinBuffer(
+        sampleRate: 48000,
+        channels: 2,
+        startupBufferMs: 100,
+        maxBufferMs: 15000,
+      );
+      buffer.pullSamples(960);
+      expect(buffer.isInUnderrun, isFalse);
+    });
+
     test('partial chunk consumption advances offset correctly', () {
       final buffer = SendspinBuffer(
         sampleRate: 48000,
