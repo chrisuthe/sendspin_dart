@@ -692,5 +692,88 @@ void main() {
       expect(support['buffer_capacity'], 2 * 96000 * 2 * 3);
       p.dispose();
     });
+
+    test('group/update full payload sets state and invokes callback', () {
+      SendspinGroupState? received;
+      protocol.onGroupUpdate = (g) => received = g;
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {
+          'playback_state': 'playing',
+          'group_id': 'g1',
+          'group_name': 'Kitchen',
+        },
+      }));
+
+      expect(protocol.state.groupState.playbackState,
+          SendspinGroupPlaybackState.playing);
+      expect(protocol.state.groupState.groupId, 'g1');
+      expect(protocol.state.groupState.groupName, 'Kitchen');
+      expect(received, isNotNull);
+      expect(received!.groupId, 'g1');
+      expect(received!.groupName, 'Kitchen');
+    });
+
+    test('group/update delta merges with existing state', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {
+          'playback_state': 'playing',
+          'group_id': 'g1',
+          'group_name': 'Kitchen',
+        },
+      }));
+
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {'playback_state': 'stopped'},
+      }));
+
+      expect(protocol.state.groupState.playbackState,
+          SendspinGroupPlaybackState.stopped);
+      expect(protocol.state.groupState.groupId, 'g1');
+      expect(protocol.state.groupState.groupName, 'Kitchen');
+    });
+
+    test('group/update with playback_state stopped', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {'playback_state': 'stopped'},
+      }));
+      expect(protocol.state.groupState.playbackState,
+          SendspinGroupPlaybackState.stopped);
+    });
+
+    test('group/update with unknown playback_state falls back to unknown', () {
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {'playback_state': 'bogus'},
+      }));
+      expect(protocol.state.groupState.playbackState,
+          SendspinGroupPlaybackState.unknown);
+    });
+  });
+
+  group('SendspinGroupState', () {
+    test('mergeDelta preserves fields not present in delta', () {
+      const base = SendspinGroupState(
+        playbackState: SendspinGroupPlaybackState.playing,
+        groupId: 'g1',
+        groupName: 'Kitchen',
+      );
+      final merged =
+          base.mergeDelta(const SendspinGroupState(groupName: 'Living Room'));
+      expect(merged.playbackState, SendspinGroupPlaybackState.playing);
+      expect(merged.groupId, 'g1');
+      expect(merged.groupName, 'Living Room');
+    });
+
+    test('fresh SendspinPlayerState has empty default groupState', () {
+      const s = SendspinPlayerState();
+      expect(s.groupState.playbackState, isNull);
+      expect(s.groupState.groupId, isNull);
+      expect(s.groupState.groupName, isNull);
+    });
   });
 }

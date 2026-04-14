@@ -73,6 +73,11 @@ class SendspinPlayer {
   set onVolumeChanged(void Function(double volume, bool muted)? cb) =>
       protocol.onVolumeChanged = cb;
 
+  void Function(SendspinGroupState groupState)? get onGroupUpdate =>
+      protocol.onGroupUpdate;
+  set onGroupUpdate(void Function(SendspinGroupState groupState)? cb) =>
+      protocol.onGroupUpdate = cb;
+
   int get staticDelayMs => protocol.staticDelayMs;
 
   void Function(int delayMs)? get onStaticDelayChanged =>

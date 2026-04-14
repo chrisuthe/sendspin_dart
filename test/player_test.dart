@@ -444,5 +444,24 @@ void main() {
       final samples = player.pullSamples(960);
       expect(samples.every((s) => s == 0), isTrue);
     });
+
+    test('onGroupUpdate fires when group/update message is handled', () {
+      SendspinGroupState? received;
+      player.onGroupUpdate = (g) => received = g;
+
+      player.handleTextMessage(jsonEncode({
+        'type': 'group/update',
+        'payload': {
+          'playback_state': 'playing',
+          'group_id': 'g1',
+          'group_name': 'Kitchen',
+        },
+      }));
+
+      expect(received, isNotNull);
+      expect(received!.playbackState, SendspinGroupPlaybackState.playing);
+      expect(received!.groupId, 'g1');
+      expect(received!.groupName, 'Kitchen');
+    });
   });
 }

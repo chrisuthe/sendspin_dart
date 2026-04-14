@@ -16,6 +16,50 @@ enum SendspinConnectionReason {
   }
 }
 
+/// Group playback state reported via group/update.
+enum SendspinGroupPlaybackState {
+  playing('playing'),
+  stopped('stopped'),
+  unknown('unknown');
+
+  final String wireValue;
+  const SendspinGroupPlaybackState(this.wireValue);
+
+  static SendspinGroupPlaybackState fromWire(String? value) {
+    for (final s in SendspinGroupPlaybackState.values) {
+      if (s.wireValue == value) return s;
+    }
+    return SendspinGroupPlaybackState.unknown;
+  }
+}
+
+/// Group state reported by the server via group/update messages.
+///
+/// All fields are nullable because the message is delta-encoded: the
+/// server only sends fields that have changed. Consumers merge incoming
+/// deltas with their existing view via [mergeDelta].
+class SendspinGroupState {
+  final SendspinGroupPlaybackState? playbackState;
+  final String? groupId;
+  final String? groupName;
+
+  const SendspinGroupState({
+    this.playbackState,
+    this.groupId,
+    this.groupName,
+  });
+
+  /// Returns a new state with any non-null fields from [delta] applied
+  /// on top of this state.
+  SendspinGroupState mergeDelta(SendspinGroupState delta) {
+    return SendspinGroupState(
+      playbackState: delta.playbackState ?? playbackState,
+      groupId: delta.groupId ?? groupId,
+      groupName: delta.groupName ?? groupName,
+    );
+  }
+}
+
 /// Connection states for the Sendspin player lifecycle.
 enum SendspinConnectionState {
   disabled,
@@ -41,6 +85,7 @@ class SendspinPlayerState {
   final int staticDelayMs;
   final SendspinConnectionReason connectionReason;
   final List<String> activeRoles;
+  final SendspinGroupState groupState;
 
   const SendspinPlayerState({
     this.connectionState = SendspinConnectionState.disabled,
@@ -56,6 +101,7 @@ class SendspinPlayerState {
     this.staticDelayMs = 0,
     this.connectionReason = SendspinConnectionReason.unknown,
     this.activeRoles = const <String>[],
+    this.groupState = const SendspinGroupState(),
   });
 
   bool get isActive =>
@@ -77,6 +123,7 @@ class SendspinPlayerState {
     int? staticDelayMs,
     SendspinConnectionReason? connectionReason,
     List<String>? activeRoles,
+    SendspinGroupState? groupState,
   }) {
     return SendspinPlayerState(
       connectionState: connectionState ?? this.connectionState,
@@ -92,6 +139,7 @@ class SendspinPlayerState {
       staticDelayMs: staticDelayMs ?? this.staticDelayMs,
       connectionReason: connectionReason ?? this.connectionReason,
       activeRoles: activeRoles ?? this.activeRoles,
+      groupState: groupState ?? this.groupState,
     );
   }
 }

@@ -119,6 +119,10 @@ class SendspinProtocol {
   /// Called when the server updates the static delay via server/command.
   void Function(int delayMs)? onStaticDelayChanged;
 
+  /// Called when a group/update message arrives. The argument is the
+  /// merged state after applying the delta.
+  void Function(SendspinGroupState groupState)? onGroupUpdate;
+
   SendspinProtocol({
     required this.playerName,
     required this.clientId,
@@ -293,7 +297,31 @@ class SendspinProtocol {
         _handleServerCommand(payload);
       case 'server/state':
         _handleServerState(payload);
+      case 'group/update':
+        _handleGroupUpdate(payload);
     }
+  }
+
+  void _handleGroupUpdate(Map<String, dynamic> payload) {
+    SendspinGroupPlaybackState? newPlaybackState;
+    if (payload.containsKey('playback_state')) {
+      newPlaybackState = SendspinGroupPlaybackState.fromWire(
+          payload['playback_state'] as String?);
+    }
+
+    final delta = SendspinGroupState(
+      playbackState: newPlaybackState,
+      groupId: payload.containsKey('group_id')
+          ? payload['group_id'] as String?
+          : null,
+      groupName: payload.containsKey('group_name')
+          ? payload['group_name'] as String?
+          : null,
+    );
+
+    final merged = _state.groupState.mergeDelta(delta);
+    _updateState(_state.copyWith(groupState: merged));
+    onGroupUpdate?.call(merged);
   }
 
   void _handleServerHello(Map<String, dynamic> payload) {
