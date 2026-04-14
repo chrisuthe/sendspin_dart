@@ -755,6 +755,226 @@ void main() {
     });
   });
 
+  group('server/state metadata', () {
+    late SendspinProtocol p;
+    setUp(() {
+      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+    });
+    tearDown(() => p.dispose());
+
+    test(
+        'server/state with full metadata populates SendspinMetadata and invokes onMetadataUpdate',
+        () {
+      SendspinMetadata? received;
+      p.onMetadataUpdate = (m) => received = m;
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {
+            'timestamp': 123456789,
+            'title': 'Song',
+            'artist': 'Artist',
+            'album_artist': 'AA',
+            'album': 'Album',
+            'artwork_url': 'http://x/y.png',
+            'year': 2024,
+            'track': 3,
+            'repeat': 'one',
+            'shuffle': true,
+          },
+        },
+      }));
+      expect(received, isNotNull);
+      expect(received!.title, 'Song');
+      expect(received!.artist, 'Artist');
+      expect(received!.albumArtist, 'AA');
+      expect(received!.album, 'Album');
+      expect(received!.artworkUrl, 'http://x/y.png');
+      expect(received!.year, 2024);
+      expect(received!.track, 3);
+      expect(received!.repeat, SendspinRepeatMode.one);
+      expect(received!.shuffle, true);
+      expect(p.state.metadata, same(received));
+    });
+
+    test(
+        'server/state metadata with progress object populates SendspinMetadataProgress',
+        () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {
+            'progress': {
+              'track_progress': 5000,
+              'track_duration': 240000,
+              'playback_speed': 1000,
+            },
+          },
+        },
+      }));
+      final prog = p.state.metadata!.progress!;
+      expect(prog.trackProgress, 5000);
+      expect(prog.trackDuration, 240000);
+      expect(prog.playbackSpeed, 1000);
+    });
+
+    test('server/state metadata with null title clears title', () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'title': null, 'artist': 'A'},
+        },
+      }));
+      expect(p.state.metadata!.title, isNull);
+      expect(p.state.metadata!.artist, 'A');
+    });
+
+    test('server/state metadata repeat "all" parses correctly', () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'repeat': 'all'},
+        },
+      }));
+      expect(p.state.metadata!.repeat, SendspinRepeatMode.all);
+    });
+
+    test('server/state metadata repeat null becomes unknown', () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'repeat': null},
+        },
+      }));
+      expect(p.state.metadata!.repeat, SendspinRepeatMode.unknown);
+    });
+
+    test('server/state metadata with no progress object leaves progress null',
+        () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'title': 'X'},
+        },
+      }));
+      expect(p.state.metadata!.progress, isNull);
+    });
+
+    test('server/state metadata timestamp and year coerce from num', () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'timestamp': 1234.0, 'year': 2023.0, 'track': 2.0},
+        },
+      }));
+      expect(p.state.metadata!.timestamp, 1234);
+      expect(p.state.metadata!.year, 2023);
+      expect(p.state.metadata!.track, 2);
+    });
+  });
+
+  group('server/state controller', () {
+    late SendspinProtocol p;
+    setUp(() {
+      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+    });
+    tearDown(() => p.dispose());
+
+    test(
+        'server/state with controller populates SendspinControllerInfo and invokes onControllerUpdate',
+        () {
+      SendspinControllerInfo? received;
+      p.onControllerUpdate = (c) => received = c;
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'controller': {
+            'supported_commands': ['play', 'pause', 'next'],
+            'volume': 55,
+            'muted': true,
+          },
+        },
+      }));
+      expect(received, isNotNull);
+      expect(received!.supportedCommands, ['play', 'pause', 'next']);
+      expect(received!.volume, 55);
+      expect(received!.muted, true);
+      expect(p.state.controller, same(received));
+    });
+
+    test(
+        'server/state controller filters non-string entries from supported_commands',
+        () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'controller': {
+            'supported_commands': ['play', 42, null, 'pause'],
+          },
+        },
+      }));
+      expect(p.state.controller!.supportedCommands, ['play', 'pause']);
+    });
+
+    test(
+        'server/state controller with missing volume defaults to 0 and muted defaults to false',
+        () {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'controller': {
+            'supported_commands': ['play'],
+          },
+        },
+      }));
+      expect(p.state.controller!.volume, 0);
+      expect(p.state.controller!.muted, false);
+    });
+  });
+
+  group('server/state combined', () {
+    late SendspinProtocol p;
+    setUp(() {
+      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+    });
+    tearDown(() => p.dispose());
+
+    test('server/state with neither metadata nor controller is a no-op', () {
+      var metaFired = 0;
+      var ctrlFired = 0;
+      p.onMetadataUpdate = (_) => metaFired++;
+      p.onControllerUpdate = (_) => ctrlFired++;
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': <String, dynamic>{},
+      }));
+      expect(metaFired, 0);
+      expect(ctrlFired, 0);
+      expect(p.state.metadata, isNull);
+      expect(p.state.controller, isNull);
+    });
+
+    test(
+        'server/state with both metadata and controller invokes both callbacks',
+        () {
+      var metaFired = 0;
+      var ctrlFired = 0;
+      p.onMetadataUpdate = (_) => metaFired++;
+      p.onControllerUpdate = (_) => ctrlFired++;
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'title': 'T'},
+          'controller': {'volume': 10},
+        },
+      }));
+      expect(metaFired, 1);
+      expect(ctrlFired, 1);
+      expect(p.state.metadata!.title, 'T');
+      expect(p.state.controller!.volume, 10);
+    });
+  });
+
   group('SendspinGroupState', () {
     test('mergeDelta preserves fields not present in delta', () {
       const base = SendspinGroupState(

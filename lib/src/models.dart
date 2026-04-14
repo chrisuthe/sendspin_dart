@@ -60,6 +60,97 @@ class SendspinGroupState {
   }
 }
 
+/// Repeat mode reported in server/state metadata.
+enum SendspinRepeatMode {
+  off('off'),
+  one('one'),
+  all('all'),
+  unknown('unknown');
+
+  final String wireValue;
+  const SendspinRepeatMode(this.wireValue);
+
+  static SendspinRepeatMode fromWire(String? value) {
+    if (value == null) return SendspinRepeatMode.unknown;
+    for (final r in SendspinRepeatMode.values) {
+      if (r.wireValue == value) return r;
+    }
+    return SendspinRepeatMode.unknown;
+  }
+}
+
+/// Playback progress sub-object inside metadata.
+///
+/// Used to compute the current track position via the spec formula:
+///   progress = track_progress + (now - timestamp) * playback_speed / 1_000_000
+class SendspinMetadataProgress {
+  /// Current track progress in milliseconds at the moment the enclosing
+  /// metadata [SendspinMetadata.timestamp] was captured.
+  final int trackProgress;
+
+  /// Total track duration in milliseconds; 0 means unlimited (e.g. live stream).
+  final int trackDuration;
+
+  /// Playback speed multiplied by 1000 (1000 = 1.0x, 1500 = 1.5x, 0 = paused).
+  final int playbackSpeed;
+
+  const SendspinMetadataProgress({
+    required this.trackProgress,
+    required this.trackDuration,
+    required this.playbackSpeed,
+  });
+}
+
+/// Now-playing metadata reported via server/state.
+///
+/// All fields are optional. When the server sends a server/state with a
+/// metadata object, this replaces the previous snapshot in full — any
+/// field not present in the new message is treated as cleared.
+class SendspinMetadata {
+  /// Server-clock microsecond timestamp at which this metadata (and any
+  /// embedded progress) becomes valid. May be 0 if the server omitted it.
+  final int timestamp;
+  final String? title;
+  final String? artist;
+  final String? albumArtist;
+  final String? album;
+  final String? artworkUrl;
+  final int? year;
+  final int? track;
+  final SendspinMetadataProgress? progress;
+  final SendspinRepeatMode repeat;
+  final bool? shuffle;
+
+  const SendspinMetadata({
+    this.timestamp = 0,
+    this.title,
+    this.artist,
+    this.albumArtist,
+    this.album,
+    this.artworkUrl,
+    this.year,
+    this.track,
+    this.progress,
+    this.repeat = SendspinRepeatMode.unknown,
+    this.shuffle,
+  });
+}
+
+/// Controller capabilities reported via server/state. Describes what
+/// commands this client may issue if it is acting as a controller, along
+/// with the current group volume/mute.
+class SendspinControllerInfo {
+  final List<String> supportedCommands;
+  final int volume;
+  final bool muted;
+
+  const SendspinControllerInfo({
+    this.supportedCommands = const <String>[],
+    this.volume = 0,
+    this.muted = false,
+  });
+}
+
 /// Connection states for the Sendspin player lifecycle.
 enum SendspinConnectionState {
   disabled,
@@ -86,6 +177,8 @@ class SendspinPlayerState {
   final SendspinConnectionReason connectionReason;
   final List<String> activeRoles;
   final SendspinGroupState groupState;
+  final SendspinMetadata? metadata;
+  final SendspinControllerInfo? controller;
 
   const SendspinPlayerState({
     this.connectionState = SendspinConnectionState.disabled,
@@ -102,6 +195,8 @@ class SendspinPlayerState {
     this.connectionReason = SendspinConnectionReason.unknown,
     this.activeRoles = const <String>[],
     this.groupState = const SendspinGroupState(),
+    this.metadata,
+    this.controller,
   });
 
   bool get isActive =>
@@ -124,6 +219,8 @@ class SendspinPlayerState {
     SendspinConnectionReason? connectionReason,
     List<String>? activeRoles,
     SendspinGroupState? groupState,
+    SendspinMetadata? metadata,
+    SendspinControllerInfo? controller,
   }) {
     return SendspinPlayerState(
       connectionState: connectionState ?? this.connectionState,
@@ -140,6 +237,8 @@ class SendspinPlayerState {
       connectionReason: connectionReason ?? this.connectionReason,
       activeRoles: activeRoles ?? this.activeRoles,
       groupState: groupState ?? this.groupState,
+      metadata: metadata ?? this.metadata,
+      controller: controller ?? this.controller,
     );
   }
 }

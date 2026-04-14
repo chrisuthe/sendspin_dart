@@ -123,6 +123,14 @@ class SendspinProtocol {
   /// merged state after applying the delta.
   void Function(SendspinGroupState groupState)? onGroupUpdate;
 
+  /// Called when a server/state message updates the metadata sub-object.
+  /// The argument is the full new snapshot.
+  void Function(SendspinMetadata metadata)? onMetadataUpdate;
+
+  /// Called when a server/state message updates the controller sub-object.
+  /// The argument is the full new snapshot.
+  void Function(SendspinControllerInfo controller)? onControllerUpdate;
+
   SendspinProtocol({
     required this.playerName,
     required this.clientId,
@@ -442,7 +450,63 @@ class SendspinProtocol {
   }
 
   void _handleServerState(Map<String, dynamic> payload) {
-    // Server state carries metadata, controller info — no action needed.
+    final metadata =
+        _parseMetadata(payload['metadata'] as Map<String, dynamic>?);
+    final controller =
+        _parseController(payload['controller'] as Map<String, dynamic>?);
+
+    if (metadata == null && controller == null) return;
+
+    // Per-message full-snapshot replacement: the spec doesn't mark
+    // server/state as delta-encoded, and Music Assistant sends complete
+    // sub-objects, so we replace wholesale rather than field-merging.
+    var newState = _state;
+    if (metadata != null) newState = newState.copyWith(metadata: metadata);
+    if (controller != null) {
+      newState = newState.copyWith(controller: controller);
+    }
+    _updateState(newState);
+
+    if (metadata != null) onMetadataUpdate?.call(metadata);
+    if (controller != null) onControllerUpdate?.call(controller);
+  }
+
+  SendspinMetadata? _parseMetadata(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    final progressJson = json['progress'] as Map<String, dynamic>?;
+    SendspinMetadataProgress? progress;
+    if (progressJson != null) {
+      progress = SendspinMetadataProgress(
+        trackProgress: (progressJson['track_progress'] as num?)?.toInt() ?? 0,
+        trackDuration: (progressJson['track_duration'] as num?)?.toInt() ?? 0,
+        playbackSpeed:
+            (progressJson['playback_speed'] as num?)?.toInt() ?? 1000,
+      );
+    }
+    return SendspinMetadata(
+      timestamp: (json['timestamp'] as num?)?.toInt() ?? 0,
+      title: json['title'] as String?,
+      artist: json['artist'] as String?,
+      albumArtist: json['album_artist'] as String?,
+      album: json['album'] as String?,
+      artworkUrl: json['artwork_url'] as String?,
+      year: (json['year'] as num?)?.toInt(),
+      track: (json['track'] as num?)?.toInt(),
+      progress: progress,
+      repeat: SendspinRepeatMode.fromWire(json['repeat'] as String?),
+      shuffle: json['shuffle'] as bool?,
+    );
+  }
+
+  SendspinControllerInfo? _parseController(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    final rawCommands = json['supported_commands'] as List?;
+    return SendspinControllerInfo(
+      supportedCommands:
+          rawCommands?.whereType<String>().toList() ?? const <String>[],
+      volume: (json['volume'] as num?)?.toInt() ?? 0,
+      muted: json['muted'] as bool? ?? false,
+    );
   }
 
   // -------------------------------------------------------------------------

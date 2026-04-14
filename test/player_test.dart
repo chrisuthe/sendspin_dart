@@ -445,6 +445,42 @@ void main() {
       expect(samples.every((s) => s == 0), isTrue);
     });
 
+    test('onMetadataUpdate fires when server/state with metadata is handled',
+        () {
+      SendspinMetadata? received;
+      player.onMetadataUpdate = (m) => received = m;
+      player.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'metadata': {'title': 'Song', 'artist': 'A'},
+        },
+      }));
+      expect(received, isNotNull);
+      expect(received!.title, 'Song');
+      expect(received!.artist, 'A');
+      expect(player.state.metadata!.title, 'Song');
+    });
+
+    test(
+        'onControllerUpdate fires when server/state with controller is handled',
+        () {
+      SendspinControllerInfo? received;
+      player.onControllerUpdate = (c) => received = c;
+      player.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {
+          'controller': {
+            'supported_commands': ['play'],
+            'volume': 30,
+            'muted': false,
+          },
+        },
+      }));
+      expect(received, isNotNull);
+      expect(received!.volume, 30);
+      expect(player.state.controller!.supportedCommands, ['play']);
+    });
+
     test('onGroupUpdate fires when group/update message is handled', () {
       SendspinGroupState? received;
       player.onGroupUpdate = (g) => received = g;

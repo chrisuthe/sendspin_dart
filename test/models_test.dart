@@ -28,4 +28,40 @@ void main() {
       expect(config.codecHeader, isNull);
     });
   });
+
+  group('SendspinMetadata', () {
+    test('defaults: all-null fields and repeat is unknown', () {
+      const m = SendspinMetadata();
+      expect(m.timestamp, 0);
+      expect(m.title, isNull);
+      expect(m.artist, isNull);
+      expect(m.albumArtist, isNull);
+      expect(m.album, isNull);
+      expect(m.artworkUrl, isNull);
+      expect(m.year, isNull);
+      expect(m.track, isNull);
+      expect(m.progress, isNull);
+      expect(m.shuffle, isNull);
+      expect(m.repeat, SendspinRepeatMode.unknown);
+    });
+  });
+
+  group('SendspinRepeatMode.fromWire', () {
+    test('maps all four wire values', () {
+      expect(SendspinRepeatMode.fromWire('off'), SendspinRepeatMode.off);
+      expect(SendspinRepeatMode.fromWire('one'), SendspinRepeatMode.one);
+      expect(SendspinRepeatMode.fromWire('all'), SendspinRepeatMode.all);
+      expect(SendspinRepeatMode.fromWire(null), SendspinRepeatMode.unknown);
+      expect(SendspinRepeatMode.fromWire('bogus'), SendspinRepeatMode.unknown);
+    });
+  });
+
+  group('SendspinControllerInfo', () {
+    test('defaults', () {
+      const c = SendspinControllerInfo();
+      expect(c.supportedCommands, isEmpty);
+      expect(c.volume, 0);
+      expect(c.muted, false);
+    });
+  });
 }

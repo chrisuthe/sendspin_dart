@@ -78,6 +78,17 @@ class SendspinPlayer {
   set onGroupUpdate(void Function(SendspinGroupState groupState)? cb) =>
       protocol.onGroupUpdate = cb;
 
+  void Function(SendspinMetadata metadata)? get onMetadataUpdate =>
+      protocol.onMetadataUpdate;
+  set onMetadataUpdate(void Function(SendspinMetadata metadata)? cb) =>
+      protocol.onMetadataUpdate = cb;
+
+  void Function(SendspinControllerInfo controller)? get onControllerUpdate =>
+      protocol.onControllerUpdate;
+  set onControllerUpdate(
+          void Function(SendspinControllerInfo controller)? cb) =>
+      protocol.onControllerUpdate = cb;
+
   int get staticDelayMs => protocol.staticDelayMs;
 
   void Function(int delayMs)? get onStaticDelayChanged =>
