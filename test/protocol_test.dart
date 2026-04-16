@@ -1315,6 +1315,52 @@ void main() {
       }
       p.dispose();
     });
+
+    test('sendControllerVolume throws RangeError for out-of-range values', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      p.onSendText = (_) {};
+      expect(() => p.sendControllerVolume(-1), throwsRangeError);
+      expect(() => p.sendControllerVolume(101), throwsRangeError);
+      // Boundary values should work
+      p.sendControllerVolume(0);
+      p.sendControllerVolume(100);
+      p.dispose();
+    });
+  });
+
+  group('buildClientState role-awareness', () {
+    test('controller-only client omits player block from client/state', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['state'], 'synchronized');
+      expect(payload.containsKey('player'), isFalse);
+      p.dispose();
+    });
+
+    test('player role includes player block in client/state', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+      );
+      final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['state'], 'synchronized');
+      expect(payload.containsKey('player'), isTrue);
+      expect((payload['player'] as Map)['volume'], 100);
+      p.dispose();
+    });
   });
 
   group('artwork binary frames', () {

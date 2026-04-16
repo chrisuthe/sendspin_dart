@@ -156,7 +156,7 @@ class SendspinProtocol {
       throw ArgumentError(
           'artworkChannels is required when artwork role is present');
     }
-    if (artworkChannels != null && artworkChannels!.length > 4) {
+    if (roles.contains(SendspinRole.artwork) && artworkChannels!.length > 4) {
       throw ArgumentError('artworkChannels may have at most 4 entries');
     }
     _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
@@ -251,18 +251,20 @@ class SendspinProtocol {
 
   /// Builds a client/state report.
   String buildClientState() {
-    return jsonEncode({
-      'type': 'client/state',
-      'payload': {
-        'state': _pipelineError ? 'error' : 'synchronized',
-        'player': {
-          'volume': (_state.volume * 100).round(),
-          'muted': _state.muted,
-          'static_delay_ms': _staticDelayMs,
-          'supported_commands': ['volume', 'mute', 'set_static_delay'],
-        },
-      },
-    });
+    final payload = <String, dynamic>{
+      'state': _pipelineError ? 'error' : 'synchronized',
+    };
+
+    if (roles.contains(SendspinRole.player)) {
+      payload['player'] = {
+        'volume': (_state.volume * 100).round(),
+        'muted': _state.muted,
+        'static_delay_ms': _staticDelayMs,
+        'supported_commands': ['volume', 'mute', 'set_static_delay'],
+      };
+    }
+
+    return jsonEncode({'type': 'client/state', 'payload': payload});
   }
 
   /// Builds a client/goodbye message with the given reason.
@@ -316,8 +318,10 @@ class SendspinProtocol {
   /// Sends a controller volume command (0-100).
   ///
   /// Throws [StateError] if the controller role is not active.
+  /// Throws [RangeError] if [volume] is outside 0-100.
   void sendControllerVolume(int volume) {
     _requireRole(SendspinRole.controller);
+    RangeError.checkValueInInterval(volume, 0, 100, 'volume');
     onSendText?.call(jsonEncode({
       'type': 'client/command',
       'payload': {
