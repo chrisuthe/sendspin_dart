@@ -20,6 +20,8 @@ enum SendspinGoodbyeReason {
 /// (bits 000001_xx). Artwork is 8-11, visualizer is 16-23.
 const int _binaryTypePlayerMin = 4;
 const int _binaryTypePlayerMax = 7;
+const int _binaryTypeArtworkMin = 8;
+const int _binaryTypeArtworkMax = 11;
 
 /// A parsed binary audio frame from the Sendspin protocol.
 class AudioFrame {
@@ -114,6 +116,9 @@ class SendspinProtocol {
 
   /// Called when a binary audio frame is received.
   void Function(AudioFrame frame)? onAudioFrame;
+
+  /// Called when a binary artwork frame is received (artwork role).
+  void Function(ArtworkFrame frame)? onArtworkFrame;
 
   /// Called when the server changes volume or mute via server/command.
   void Function(double volume, bool muted)? onVolumeChanged;
@@ -533,22 +538,36 @@ class SendspinProtocol {
   // Binary message handling
   // -------------------------------------------------------------------------
 
-  /// Handles an incoming binary audio frame.
+  /// Handles an incoming binary frame, dispatching by type range and active
+  /// roles.
   ///
-  /// Parses the frame and emits it via [onAudioFrame] only if the frame is
-  /// a player-range type (4-7). Non-player frames (artwork, visualizer) are
-  /// silently dropped. Does not decode or buffer — that is the player layer's
-  /// responsibility.
+  /// Player frames (type 4-7) are forwarded to [onAudioFrame] only when the
+  /// [SendspinRole.player] role is active. Artwork frames (type 8-11) are
+  /// forwarded to [onArtworkFrame] only when [SendspinRole.artwork] is active.
+  /// All other type ranges are silently dropped.
   void handleBinaryMessage(Uint8List data) {
-    if (data.length < 9) {
-      return;
-    }
+    if (data.length < 9) return;
     final frame = parseBinaryFrame(data);
-    if (frame.type < _binaryTypePlayerMin ||
-        frame.type > _binaryTypePlayerMax) {
+
+    if (frame.type >= _binaryTypePlayerMin &&
+        frame.type <= _binaryTypePlayerMax) {
+      if (roles.contains(SendspinRole.player)) {
+        onAudioFrame?.call(frame);
+      }
       return;
     }
-    onAudioFrame?.call(frame);
+
+    if (frame.type >= _binaryTypeArtworkMin &&
+        frame.type <= _binaryTypeArtworkMax) {
+      if (roles.contains(SendspinRole.artwork)) {
+        onArtworkFrame?.call(ArtworkFrame(
+          channel: frame.type - _binaryTypeArtworkMin,
+          timestampUs: frame.timestampUs,
+          imageData: frame.audioData,
+        ));
+      }
+      return;
+    }
   }
 
   /// Parses a binary frame: byte 0 = message type, bytes 1-8 = BE int64

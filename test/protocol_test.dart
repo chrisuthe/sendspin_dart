@@ -1158,4 +1158,116 @@ void main() {
       expect(s.groupState.groupName, isNull);
     });
   });
+
+  group('artwork binary frames', () {
+    Uint8List buildTypedFrame(int type, int timestampUs, List<int> payload) {
+      final frame = Uint8List(9 + payload.length);
+      frame[0] = type;
+      ByteData.view(frame.buffer).setInt64(1, timestampUs, Endian.big);
+      frame.setRange(9, frame.length, payload);
+      return frame;
+    }
+
+    test('artwork role receives artwork frames via onArtworkFrame', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+        ],
+      );
+      ArtworkFrame? received;
+      p.onArtworkFrame = (f) => received = f;
+
+      p.handleBinaryMessage(buildTypedFrame(8, 555000, [0xFF, 0xD8, 0xFF]));
+
+      expect(received, isNotNull);
+      expect(received!.channel, 0);
+      expect(received!.timestampUs, 555000);
+      expect(received!.imageData, [0xFF, 0xD8, 0xFF]);
+      p.dispose();
+    });
+
+    test('artwork frame type 11 maps to channel 3', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(source: 'artist', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(source: 'none', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(source: 'album', format: 'png', mediaWidth: 100, mediaHeight: 100),
+        ],
+      );
+      ArtworkFrame? received;
+      p.onArtworkFrame = (f) => received = f;
+
+      p.handleBinaryMessage(buildTypedFrame(11, 999, [0x01]));
+
+      expect(received, isNotNull);
+      expect(received!.channel, 3);
+      p.dispose();
+    });
+
+    test('artwork frames are dropped when artwork role is not active', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+        roles: const {SendspinRole.player},
+      );
+      ArtworkFrame? received;
+      p.onArtworkFrame = (f) => received = f;
+
+      p.handleBinaryMessage(buildTypedFrame(8, 1, [0x01]));
+
+      expect(received, isNull);
+      p.dispose();
+    });
+
+    test('player frames still work alongside artwork role', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+        roles: const {SendspinRole.player, SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+        ],
+      );
+      AudioFrame? audioReceived;
+      ArtworkFrame? artworkReceived;
+      p.onAudioFrame = (f) => audioReceived = f;
+      p.onArtworkFrame = (f) => artworkReceived = f;
+
+      p.handleBinaryMessage(buildTypedFrame(4, 100, [0x01, 0x02]));
+      p.handleBinaryMessage(buildTypedFrame(8, 200, [0xFF, 0xD8]));
+
+      expect(audioReceived, isNotNull);
+      expect(audioReceived!.type, 4);
+      expect(artworkReceived, isNotNull);
+      expect(artworkReceived!.channel, 0);
+      p.dispose();
+    });
+
+    test('player frames dropped when player role not active', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      AudioFrame? received;
+      p.onAudioFrame = (f) => received = f;
+
+      p.handleBinaryMessage(buildTypedFrame(4, 1, [0x01]));
+
+      expect(received, isNull);
+      p.dispose();
+    });
+  });
 }
