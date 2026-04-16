@@ -859,12 +859,14 @@ void main() {
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
       final payload = parsed['payload'] as Map<String, dynamic>;
       final roles = (payload['supported_roles'] as List).cast<String>();
-      expect(roles, containsAll([
-        'player@v1',
-        'controller@v1',
-        'metadata@v1',
-        'artwork@v1',
-      ]));
+      expect(
+          roles,
+          containsAll([
+            'player@v1',
+            'controller@v1',
+            'metadata@v1',
+            'artwork@v1',
+          ]));
       expect(payload.containsKey('player@v1_support'), isTrue);
       expect(payload.containsKey('artwork@v1_support'), isTrue);
       expect(payload.containsKey('controller@v1_support'), isFalse);
@@ -905,11 +907,31 @@ void main() {
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
           artworkChannels: const [
-            ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-            ArtworkChannel(source: 'artist', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-            ArtworkChannel(source: 'none', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-            ArtworkChannel(source: 'album', format: 'png', mediaWidth: 100, mediaHeight: 100),
-            ArtworkChannel(source: 'artist', format: 'png', mediaWidth: 100, mediaHeight: 100),
+            ArtworkChannel(
+                source: 'album',
+                format: 'jpeg',
+                mediaWidth: 100,
+                mediaHeight: 100),
+            ArtworkChannel(
+                source: 'artist',
+                format: 'jpeg',
+                mediaWidth: 100,
+                mediaHeight: 100),
+            ArtworkChannel(
+                source: 'none',
+                format: 'jpeg',
+                mediaWidth: 100,
+                mediaHeight: 100),
+            ArtworkChannel(
+                source: 'album',
+                format: 'png',
+                mediaWidth: 100,
+                mediaHeight: 100),
+            ArtworkChannel(
+                source: 'artist',
+                format: 'png',
+                mediaWidth: 100,
+                mediaHeight: 100),
           ],
         ),
         throwsArgumentError,
@@ -1160,7 +1182,8 @@ void main() {
   });
 
   group('controller commands', () {
-    test('sendControllerCommand sends client/command with controller payload', () {
+    test('sendControllerCommand sends client/command with controller payload',
+        () {
       final p = SendspinProtocol(
         playerName: 'Remote',
         clientId: 'c',
@@ -1267,9 +1290,17 @@ void main() {
       p.onSendText = sent.add;
 
       const commands = [
-        'play', 'pause', 'stop', 'next', 'previous',
-        'repeat_off', 'repeat_one', 'repeat_all',
-        'shuffle', 'unshuffle', 'switch',
+        'play',
+        'pause',
+        'stop',
+        'next',
+        'previous',
+        'repeat_off',
+        'repeat_one',
+        'repeat_all',
+        'shuffle',
+        'unshuffle',
+        'switch',
       ];
       for (final cmd in commands) {
         p.sendControllerCommand(cmd);
@@ -1302,7 +1333,11 @@ void main() {
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
-          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(
+              source: 'album',
+              format: 'jpeg',
+              mediaWidth: 100,
+              mediaHeight: 100),
         ],
       );
       ArtworkFrame? received;
@@ -1324,10 +1359,26 @@ void main() {
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
-          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-          ArtworkChannel(source: 'artist', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-          ArtworkChannel(source: 'none', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
-          ArtworkChannel(source: 'album', format: 'png', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(
+              source: 'album',
+              format: 'jpeg',
+              mediaWidth: 100,
+              mediaHeight: 100),
+          ArtworkChannel(
+              source: 'artist',
+              format: 'jpeg',
+              mediaWidth: 100,
+              mediaHeight: 100),
+          ArtworkChannel(
+              source: 'none',
+              format: 'jpeg',
+              mediaWidth: 100,
+              mediaHeight: 100),
+          ArtworkChannel(
+              source: 'album',
+              format: 'png',
+              mediaWidth: 100,
+              mediaHeight: 100),
         ],
       );
       ArtworkFrame? received;
@@ -1363,7 +1414,11 @@ void main() {
         bufferSeconds: 5,
         roles: const {SendspinRole.player, SendspinRole.artwork},
         artworkChannels: const [
-          ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+          ArtworkChannel(
+              source: 'album',
+              format: 'jpeg',
+              mediaWidth: 100,
+              mediaHeight: 100),
         ],
       );
       AudioFrame? audioReceived;

@@ -508,11 +508,13 @@ void main() {
         additionalRoles: const {SendspinRole.controller, SendspinRole.metadata},
       );
       p.onSendText = (_) {};
-      expect(p.protocol.roles, containsAll([
-        SendspinRole.player,
-        SendspinRole.controller,
-        SendspinRole.metadata,
-      ]));
+      expect(
+          p.protocol.roles,
+          containsAll([
+            SendspinRole.player,
+            SendspinRole.controller,
+            SendspinRole.metadata,
+          ]));
       p.dispose();
     });
 
