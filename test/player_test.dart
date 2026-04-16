@@ -499,5 +499,154 @@ void main() {
       expect(received!.groupId, 'g1');
       expect(received!.groupName, 'Kitchen');
     });
+
+    test('additionalRoles are passed through to protocol', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.controller, SendspinRole.metadata},
+      );
+      p.onSendText = (_) {};
+      expect(p.protocol.roles, containsAll([
+        SendspinRole.player,
+        SendspinRole.controller,
+        SendspinRole.metadata,
+      ]));
+      p.dispose();
+    });
+
+    test('player role is always included even if not in additionalRoles', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.controller},
+      );
+      p.onSendText = (_) {};
+      expect(p.protocol.roles, contains(SendspinRole.player));
+      p.dispose();
+    });
+
+    test('artwork additionalRole with channels is passed to protocol', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(
+            source: 'album',
+            format: 'jpeg',
+            mediaWidth: 300,
+            mediaHeight: 300,
+          ),
+        ],
+      );
+      p.onSendText = (_) {};
+      expect(p.protocol.roles, contains(SendspinRole.artwork));
+
+      final hello = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = hello['payload'] as Map<String, dynamic>;
+      expect(payload.containsKey('artwork@v1_support'), isTrue);
+      p.dispose();
+    });
+
+    test('sendControllerCommand delegates to protocol', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerCommand('pause');
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      expect(parsed['type'], 'client/command');
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'pause');
+      p.dispose();
+    });
+
+    test('sendControllerVolume delegates to protocol', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerVolume(60);
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'volume');
+      expect(controller['volume'], 60);
+      p.dispose();
+    });
+
+    test('sendControllerMute delegates to protocol', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerMute(false);
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'mute');
+      expect(controller['mute'], false);
+      p.dispose();
+    });
+
+    test('onArtworkFrame callback fires via player delegation', () {
+      final p = SendspinPlayer(
+        playerName: 'Full',
+        clientId: 'c',
+        bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(
+            source: 'album',
+            format: 'jpeg',
+            mediaWidth: 100,
+            mediaHeight: 100,
+          ),
+        ],
+      );
+      p.onSendText = (_) {};
+
+      ArtworkFrame? received;
+      p.onArtworkFrame = (f) => received = f;
+
+      final frame = Uint8List(12);
+      frame[0] = 8; // artwork type
+      ByteData.view(frame.buffer).setInt64(1, 777, Endian.big);
+      frame[9] = 0xFF;
+      frame[10] = 0xD8;
+      frame[11] = 0xFF;
+      p.handleBinaryMessage(frame);
+
+      expect(received, isNotNull);
+      expect(received!.channel, 0);
+      expect(received!.timestampUs, 777);
+      p.dispose();
+    });
   });
 }

@@ -44,6 +44,8 @@ class SendspinPlayer {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 48000, bitDepth: 16),
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
+    Set<SendspinRole> additionalRoles = const {},
+    List<ArtworkChannel>? artworkChannels,
     this.codecFactory,
     int initialStaticDelayMs = 0,
   })  : bufferSeconds = bufferSeconds,
@@ -53,6 +55,8 @@ class SendspinPlayer {
           bufferSeconds: bufferSeconds,
           deviceInfo: deviceInfo,
           supportedFormats: supportedFormats,
+          roles: {SendspinRole.player, ...additionalRoles},
+          artworkChannels: artworkChannels,
           initialStaticDelayMs: initialStaticDelayMs,
         ) {
     _wireProtocol();
@@ -89,6 +93,11 @@ class SendspinPlayer {
           void Function(SendspinControllerInfo controller)? cb) =>
       protocol.onControllerUpdate = cb;
 
+  void Function(ArtworkFrame frame)? get onArtworkFrame =>
+      protocol.onArtworkFrame;
+  set onArtworkFrame(void Function(ArtworkFrame frame)? cb) =>
+      protocol.onArtworkFrame = cb;
+
   int get staticDelayMs => protocol.staticDelayMs;
 
   void Function(int delayMs)? get onStaticDelayChanged =>
@@ -110,6 +119,12 @@ class SendspinPlayer {
 
   void sendGoodbye(SendspinGoodbyeReason reason) =>
       protocol.sendGoodbye(reason);
+
+  void sendControllerCommand(String command) =>
+      protocol.sendControllerCommand(command);
+  void sendControllerVolume(int volume) =>
+      protocol.sendControllerVolume(volume);
+  void sendControllerMute(bool mute) => protocol.sendControllerMute(mute);
 
   void handleTextMessage(String text) => protocol.handleTextMessage(text);
   void handleBinaryMessage(Uint8List data) =>
