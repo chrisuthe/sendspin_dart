@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
@@ -62,6 +64,58 @@ void main() {
       expect(c.supportedCommands, isEmpty);
       expect(c.volume, 0);
       expect(c.muted, false);
+    });
+  });
+
+  group('SendspinRole', () {
+    test('wireValue maps correctly', () {
+      expect(SendspinRole.player.wireValue, 'player@v1');
+      expect(SendspinRole.controller.wireValue, 'controller@v1');
+      expect(SendspinRole.metadata.wireValue, 'metadata@v1');
+      expect(SendspinRole.artwork.wireValue, 'artwork@v1');
+    });
+  });
+
+  group('ArtworkChannel', () {
+    test('stores all fields', () {
+      const ch = ArtworkChannel(
+        source: 'album',
+        format: 'jpeg',
+        mediaWidth: 512,
+        mediaHeight: 512,
+      );
+      expect(ch.source, 'album');
+      expect(ch.format, 'jpeg');
+      expect(ch.mediaWidth, 512);
+      expect(ch.mediaHeight, 512);
+    });
+
+    test('toJson produces correct wire format', () {
+      const ch = ArtworkChannel(
+        source: 'artist',
+        format: 'png',
+        mediaWidth: 256,
+        mediaHeight: 256,
+      );
+      expect(ch.toJson(), {
+        'source': 'artist',
+        'format': 'png',
+        'media_width': 256,
+        'media_height': 256,
+      });
+    });
+  });
+
+  group('ArtworkFrame', () {
+    test('stores channel, timestamp, and image data', () {
+      final frame = ArtworkFrame(
+        channel: 2,
+        timestampUs: 123456,
+        imageData: Uint8List.fromList([0xFF, 0xD8]),
+      );
+      expect(frame.channel, 2);
+      expect(frame.timestampUs, 123456);
+      expect(frame.imageData, [0xFF, 0xD8]);
     });
   });
 }

@@ -1,3 +1,17 @@
+// ABOUTME: Data models for the Sendspin streaming-audio protocol.
+import 'dart:typed_data';
+
+/// Client roles defined by the Sendspin protocol.
+enum SendspinRole {
+  player('player@v1'),
+  controller('controller@v1'),
+  metadata('metadata@v1'),
+  artwork('artwork@v1');
+
+  final String wireValue;
+  const SendspinRole(this.wireValue);
+}
+
 /// Reason a Sendspin server initiated (or accepted) a connection.
 /// Used to prioritize between multiple servers during discovery.
 enum SendspinConnectionReason {
@@ -262,5 +276,45 @@ class StreamConfig {
     required this.sampleRate,
     required this.bitDepth,
     this.codecHeader,
+  });
+}
+
+/// Artwork channel configuration for the artwork@v1 role.
+///
+/// Each channel requests a specific image source, format, and resolution.
+/// Up to 4 channels may be configured (mapping to binary frame types 8-11).
+class ArtworkChannel {
+  final String source;
+  final String format;
+  final int mediaWidth;
+  final int mediaHeight;
+
+  const ArtworkChannel({
+    required this.source,
+    required this.format,
+    required this.mediaWidth,
+    required this.mediaHeight,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'source': source,
+        'format': format,
+        'media_width': mediaWidth,
+        'media_height': mediaHeight,
+      };
+}
+
+/// A parsed binary artwork frame from the Sendspin protocol.
+///
+/// Artwork frames use binary message types 8-11, mapping to channels 0-3.
+class ArtworkFrame {
+  final int channel;
+  final int timestampUs;
+  final Uint8List imageData;
+
+  const ArtworkFrame({
+    required this.channel,
+    required this.timestampUs,
+    required this.imageData,
   });
 }
