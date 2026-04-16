@@ -81,6 +81,8 @@ class SendspinProtocol {
   final int bufferSeconds;
   final DeviceInfo deviceInfo;
   final List<AudioFormat> supportedFormats;
+  final Set<SendspinRole> roles;
+  final List<ArtworkChannel>? artworkChannels;
 
   final SendspinClock _clock = SendspinClock();
 
@@ -140,8 +142,18 @@ class SendspinProtocol {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 48000, bitDepth: 16),
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
+    this.roles = const {SendspinRole.player},
+    this.artworkChannels,
     int initialStaticDelayMs = 0,
   }) {
+    if (roles.contains(SendspinRole.artwork) &&
+        (artworkChannels == null || artworkChannels!.isEmpty)) {
+      throw ArgumentError(
+          'artworkChannels is required when artwork role is present');
+    }
+    if (artworkChannels != null && artworkChannels!.length > 4) {
+      throw ArgumentError('artworkChannels may have at most 4 entries');
+    }
     _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
     _state = _state.copyWith(staticDelayMs: _staticDelayMs);
   }
@@ -182,25 +194,33 @@ class SendspinProtocol {
 
   /// Builds the client/hello handshake message per the Sendspin spec.
   String buildClientHello() {
-    return jsonEncode({
-      'type': 'client/hello',
-      'payload': {
-        'client_id': clientId,
-        'name': playerName,
-        'version': 1,
-        'supported_roles': ['player@v1'],
-        'device_info': {
-          'product_name': deviceInfo.productName,
-          'manufacturer': deviceInfo.manufacturer,
-          'software_version': deviceInfo.softwareVersion,
-        },
-        'player@v1_support': {
-          'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
-          'buffer_capacity': _computeBufferCapacityBytes(),
-          'supported_commands': ['volume', 'mute'],
-        },
+    final payload = <String, dynamic>{
+      'client_id': clientId,
+      'name': playerName,
+      'version': 1,
+      'supported_roles': roles.map((r) => r.wireValue).toList(),
+      'device_info': {
+        'product_name': deviceInfo.productName,
+        'manufacturer': deviceInfo.manufacturer,
+        'software_version': deviceInfo.softwareVersion,
       },
-    });
+    };
+
+    if (roles.contains(SendspinRole.player)) {
+      payload['player@v1_support'] = {
+        'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
+        'buffer_capacity': _computeBufferCapacityBytes(),
+        'supported_commands': ['volume', 'mute', 'set_static_delay'],
+      };
+    }
+
+    if (roles.contains(SendspinRole.artwork)) {
+      payload['artwork@v1_support'] = {
+        'channels': artworkChannels!.map((c) => c.toJson()).toList(),
+      };
+    }
+
+    return jsonEncode({'type': 'client/hello', 'payload': payload});
   }
 
   int _computeBufferCapacityBytes() {

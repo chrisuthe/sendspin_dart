@@ -755,6 +755,168 @@ void main() {
     });
   });
 
+  group('multi-role client/hello', () {
+    test('default roles produces player@v1 only (backward compat)', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['supported_roles'], ['player@v1']);
+      expect(payload.containsKey('player@v1_support'), isTrue);
+      expect(payload.containsKey('controller@v1_support'), isFalse);
+      expect(payload.containsKey('metadata@v1_support'), isFalse);
+      expect(payload.containsKey('artwork@v1_support'), isFalse);
+      p.dispose();
+    });
+
+    test('controller-only role omits player@v1_support', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['supported_roles'], ['controller@v1']);
+      expect(payload.containsKey('player@v1_support'), isFalse);
+      p.dispose();
+    });
+
+    test('metadata-only role has no support block', () {
+      final p = SendspinProtocol(
+        playerName: 'Display',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.metadata},
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['supported_roles'], ['metadata@v1']);
+      expect(payload.containsKey('player@v1_support'), isFalse);
+      expect(payload.containsKey('metadata@v1_support'), isFalse);
+      p.dispose();
+    });
+
+    test('artwork role includes artwork@v1_support with channels', () {
+      final p = SendspinProtocol(
+        playerName: 'Display',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.artwork},
+        artworkChannels: const [
+          ArtworkChannel(
+            source: 'album',
+            format: 'jpeg',
+            mediaWidth: 512,
+            mediaHeight: 512,
+          ),
+        ],
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      expect(payload['supported_roles'], ['artwork@v1']);
+      final support = payload['artwork@v1_support'] as Map<String, dynamic>;
+      final channels = support['channels'] as List;
+      expect(channels, hasLength(1));
+      final ch = channels[0] as Map<String, dynamic>;
+      expect(ch['source'], 'album');
+      expect(ch['format'], 'jpeg');
+      expect(ch['media_width'], 512);
+      expect(ch['media_height'], 512);
+      p.dispose();
+    });
+
+    test('multi-role advertises all roles and correct support blocks', () {
+      final p = SendspinProtocol(
+        playerName: 'Full Client',
+        clientId: 'c',
+        bufferSeconds: 5,
+        roles: const {
+          SendspinRole.player,
+          SendspinRole.controller,
+          SendspinRole.metadata,
+          SendspinRole.artwork,
+        },
+        artworkChannels: const [
+          ArtworkChannel(
+            source: 'album',
+            format: 'jpeg',
+            mediaWidth: 300,
+            mediaHeight: 300,
+          ),
+          ArtworkChannel(
+            source: 'artist',
+            format: 'png',
+            mediaWidth: 128,
+            mediaHeight: 128,
+          ),
+        ],
+      );
+      final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      final roles = (payload['supported_roles'] as List).cast<String>();
+      expect(roles, containsAll([
+        'player@v1',
+        'controller@v1',
+        'metadata@v1',
+        'artwork@v1',
+      ]));
+      expect(payload.containsKey('player@v1_support'), isTrue);
+      expect(payload.containsKey('artwork@v1_support'), isTrue);
+      expect(payload.containsKey('controller@v1_support'), isFalse);
+      expect(payload.containsKey('metadata@v1_support'), isFalse);
+      p.dispose();
+    });
+
+    test('artwork role without channels throws ArgumentError', () {
+      expect(
+        () => SendspinProtocol(
+          playerName: 'P',
+          clientId: 'c',
+          bufferSeconds: 0,
+          roles: const {SendspinRole.artwork},
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('artwork role with empty channels throws ArgumentError', () {
+      expect(
+        () => SendspinProtocol(
+          playerName: 'P',
+          clientId: 'c',
+          bufferSeconds: 0,
+          roles: const {SendspinRole.artwork},
+          artworkChannels: const [],
+        ),
+        throwsArgumentError,
+      );
+    });
+
+    test('artwork role with more than 4 channels throws ArgumentError', () {
+      expect(
+        () => SendspinProtocol(
+          playerName: 'P',
+          clientId: 'c',
+          bufferSeconds: 0,
+          roles: const {SendspinRole.artwork},
+          artworkChannels: const [
+            ArtworkChannel(source: 'album', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+            ArtworkChannel(source: 'artist', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+            ArtworkChannel(source: 'none', format: 'jpeg', mediaWidth: 100, mediaHeight: 100),
+            ArtworkChannel(source: 'album', format: 'png', mediaWidth: 100, mediaHeight: 100),
+            ArtworkChannel(source: 'artist', format: 'png', mediaWidth: 100, mediaHeight: 100),
+          ],
+        ),
+        throwsArgumentError,
+      );
+    });
+  });
+
   group('server/state metadata', () {
     late SendspinProtocol p;
     setUp(() {
