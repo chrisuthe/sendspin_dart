@@ -1159,6 +1159,133 @@ void main() {
     });
   });
 
+  group('controller commands', () {
+    test('sendControllerCommand sends client/command with controller payload', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerCommand('play');
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      expect(parsed['type'], 'client/command');
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'play');
+      expect(controller.containsKey('volume'), isFalse);
+      expect(controller.containsKey('mute'), isFalse);
+      p.dispose();
+    });
+
+    test('sendControllerVolume sends volume command with volume param', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerVolume(75);
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'volume');
+      expect(controller['volume'], 75);
+      p.dispose();
+    });
+
+    test('sendControllerMute sends mute command with mute param', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      p.sendControllerMute(true);
+
+      expect(sent, hasLength(1));
+      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
+      final controller =
+          (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+      expect(controller['command'], 'mute');
+      expect(controller['mute'], true);
+      p.dispose();
+    });
+
+    test('sendControllerCommand throws StateError without controller role', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+        roles: const {SendspinRole.player},
+      );
+      expect(() => p.sendControllerCommand('play'), throwsStateError);
+      p.dispose();
+    });
+
+    test('sendControllerVolume throws StateError without controller role', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+      );
+      expect(() => p.sendControllerVolume(50), throwsStateError);
+      p.dispose();
+    });
+
+    test('sendControllerMute throws StateError without controller role', () {
+      final p = SendspinProtocol(
+        playerName: 'P',
+        clientId: 'c',
+        bufferSeconds: 5,
+      );
+      expect(() => p.sendControllerMute(true), throwsStateError);
+      p.dispose();
+    });
+
+    test('all spec commands can be sent', () {
+      final p = SendspinProtocol(
+        playerName: 'Remote',
+        clientId: 'c',
+        bufferSeconds: 0,
+        roles: const {SendspinRole.controller},
+      );
+      final sent = <String>[];
+      p.onSendText = sent.add;
+
+      const commands = [
+        'play', 'pause', 'stop', 'next', 'previous',
+        'repeat_off', 'repeat_one', 'repeat_all',
+        'shuffle', 'unshuffle', 'switch',
+      ];
+      for (final cmd in commands) {
+        p.sendControllerCommand(cmd);
+      }
+
+      expect(sent, hasLength(commands.length));
+      for (int i = 0; i < commands.length; i++) {
+        final parsed = jsonDecode(sent[i]) as Map<String, dynamic>;
+        final controller =
+            (parsed['payload'] as Map)['controller'] as Map<String, dynamic>;
+        expect(controller['command'], commands[i]);
+      }
+      p.dispose();
+    });
+  });
+
   group('artwork binary frames', () {
     Uint8List buildTypedFrame(int type, int timestampUs, List<int> payload) {
       final frame = Uint8List(9 + payload.length);

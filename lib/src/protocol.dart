@@ -293,6 +293,52 @@ class SendspinProtocol {
     onSendText?.call(buildClientState());
   }
 
+  void _requireRole(SendspinRole role) {
+    if (!roles.contains(role)) {
+      throw StateError(
+          '${role.wireValue} role is required but not in the role set');
+    }
+  }
+
+  /// Sends a controller command (e.g. 'play', 'pause', 'stop', 'next').
+  ///
+  /// Throws [StateError] if the controller role is not active.
+  void sendControllerCommand(String command) {
+    _requireRole(SendspinRole.controller);
+    onSendText?.call(jsonEncode({
+      'type': 'client/command',
+      'payload': {
+        'controller': {'command': command},
+      },
+    }));
+  }
+
+  /// Sends a controller volume command (0-100).
+  ///
+  /// Throws [StateError] if the controller role is not active.
+  void sendControllerVolume(int volume) {
+    _requireRole(SendspinRole.controller);
+    onSendText?.call(jsonEncode({
+      'type': 'client/command',
+      'payload': {
+        'controller': {'command': 'volume', 'volume': volume},
+      },
+    }));
+  }
+
+  /// Sends a controller mute command.
+  ///
+  /// Throws [StateError] if the controller role is not active.
+  void sendControllerMute(bool mute) {
+    _requireRole(SendspinRole.controller);
+    onSendText?.call(jsonEncode({
+      'type': 'client/command',
+      'payload': {
+        'controller': {'command': 'mute', 'mute': mute},
+      },
+    }));
+  }
+
   /// Update volume from local UI and report to server.
   void updateVolume(double volume) {
     _updateState(_state.copyWith(volume: volume.clamp(0.0, 1.0)));
