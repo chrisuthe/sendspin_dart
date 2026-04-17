@@ -1,3 +1,18 @@
+## 0.0.4
+
+### Multi-role support
+
+- Add `SendspinRole` enum and `roles` parameter to `SendspinProtocol`; `buildClientHello` is now role-aware.
+- Add `ArtworkChannel` and `ArtworkFrame` models; dispatch artwork binary frames when the artwork role is active.
+- Add controller command-sending methods (`sendControllerCommand`, `sendControllerVolume`, `sendControllerMute`) for controller-role clients.
+- Add `additionalRoles` on `SendspinPlayer` with delegation to controller and artwork handlers; `player` role is always included.
+
+### Spec compliance
+
+- `client/state` `supported_commands` now only advertises `set_static_delay`. `volume` and `mute` belong in `client/hello`'s `player@v1_support.supported_commands`; listing them at the state level violates the spec, and newer aiosendspin closes the connection on violation.
+
+Note: version 0.0.3 was tagged on a separate lineage and never released; all of its content is rolled into 0.0.4.
+
 ## 0.0.2
 
 ### Spec compliance
