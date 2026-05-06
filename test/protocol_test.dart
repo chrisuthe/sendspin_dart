@@ -596,6 +596,68 @@ void main() {
       expect(protocol.state, isNotNull);
     });
 
+    test('startClockSync emits a single client/time on the first slot', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.startClockSync();
+      // One slot opens immediately; no second send until a reply or
+      // timeout advances the burst.
+      final timeMessages =
+          sent.where((m) => m.contains('"client/time"')).toList();
+      expect(timeMessages.length, 1);
+      protocol.stopClockSync();
+    });
+
+    test(
+        'incoming server/time advances the burst and triggers the next '
+        'client/time', () async {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.startClockSync();
+
+      // After start: exactly one client/time emitted (the first slot).
+      var timeCount = sent.where((m) => m.contains('"client/time"')).length;
+      expect(timeCount, 1, reason: 'first slot should fire on startClockSync');
+
+      // Negative control: without a reply, no further client/time should
+      // be sent (we are below the response timeout window).
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      timeCount = sent.where((m) => m.contains('"client/time"')).length;
+      expect(timeCount, 1, reason: 'no spontaneous second send');
+
+      // Feed a realistic NTP-style reply to slot 1.
+      final nowUs = DateTime.now().microsecondsSinceEpoch;
+      protocol.handleTextMessage(jsonEncode({
+        'type': 'server/time',
+        'payload': {
+          'client_transmitted': nowUs - 1000,
+          'server_received': nowUs - 500,
+          'server_transmitted': nowUs - 400,
+        },
+      }));
+
+      // After the reply: exactly two client/time messages emitted total
+      // (slot 1 from start, slot 2 triggered by the reply).
+      timeCount = sent.where((m) => m.contains('"client/time"')).length;
+      expect(timeCount, 2,
+          reason: 'reply should advance the burst to the next slot');
+      protocol.stopClockSync();
+    });
+
+    test('stopClockSync prevents further client/time sends', () async {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.startClockSync();
+      protocol.stopClockSync();
+      sent.clear();
+
+      // Even after a small delay any leftover timer should not fire.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final timeMessages =
+          sent.where((m) => m.contains('"client/time"')).toList();
+      expect(timeMessages, isEmpty);
+    });
+
     Uint8List buildTypedFrame(int type, int timestampUs, List<int> payload) {
       final frame = Uint8List(9 + payload.length);
       frame[0] = type;

@@ -20,6 +20,23 @@ will see materially different filter dynamics. The new defaults converge
 faster and recover from clock disruptions much more quickly. Anyone tuning
 around the old broken defaults should retest.
 
+### Burst-strategy clock sync
+
+- New `SendspinTimeBurst` driver implements the upstream README's
+  recommended burst strategy: 8 NTP exchanges sent **sequentially** (each
+  awaiting its reply or a 10-second timeout) every 10 seconds. Only the
+  lowest-`max_error` sample of the burst is fed to `SendspinClock.update`.
+- `SendspinProtocol` now drives clock sync via this module instead of the
+  previous parallel "5 messages 20 ms apart, every 2 s" loop, which
+  violated the filter's measurement-independence assumption on TCP /
+  WebSocket transports.
+- Behaviour change: `SendspinPlayerState.clockSamples` advances at the
+  burst rate (~6/min) rather than the per-reply rate (~150/min). The
+  semantic is the same — "filter updates processed" — but the magnitude
+  is much smaller. UI consumers using this as a "is sync alive" indicator
+  should account for the slower cadence; `clockOffsetMs` (precision in ms)
+  is the more robust health signal.
+
 ## 0.0.4
 
 ### Multi-role support

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'models.dart';
 import 'clock.dart';
+import 'time_burst.dart';
 
 /// Reason codes for the client/goodbye message (Sendspin spec).
 enum SendspinGoodbyeReason {
@@ -87,6 +88,7 @@ class SendspinProtocol {
   final List<ArtworkChannel>? artworkChannels;
 
   final SendspinClock _clock = SendspinClock();
+  final SendspinTimeBurst _timeBurst = SendspinTimeBurst();
 
   int _staticDelayMs = 0;
   bool _pipelineError = false;
@@ -95,7 +97,6 @@ class SendspinProtocol {
   final StreamController<SendspinPlayerState> _stateController =
       StreamController<SendspinPlayerState>.broadcast();
 
-  Timer? _clockSyncTimer;
   Timer? _stateReportTimer;
 
   // -------------------------------------------------------------------------
@@ -161,6 +162,20 @@ class SendspinProtocol {
     }
     _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
     _state = _state.copyWith(staticDelayMs: _staticDelayMs);
+    _wireTimeBurst();
+  }
+
+  void _wireTimeBurst() {
+    _timeBurst.onSendTimeMessage = (clientTransmittedUs) {
+      onSendText?.call(buildClientTime(clientTransmittedUs));
+    };
+    _timeBurst.onApplyBestSample = (offset, maxError, timeAdded) {
+      _clock.update(offset, maxError, timeAdded);
+      _updateState(_state.copyWith(
+        clockOffsetMs: (_clock.precisionUs / 1000).round(),
+        clockSamples: _clock.sampleCount,
+      ));
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -433,19 +448,18 @@ class SendspinProtocol {
     final clientReceived = DateTime.now().microsecondsSinceEpoch;
     final clientTransmitted = payload['client_transmitted'] as int? ?? 0;
 
-    // NTP-style offset calculation.
+    // NTP-style offset and round-trip delay.
     final offset = ((serverReceived - clientTransmitted) +
             (serverTransmitted - clientReceived)) ~/
         2;
     final delay = (clientReceived - clientTransmitted) -
         (serverTransmitted - serverReceived);
 
-    _clock.update(offset, delay ~/ 2, clientReceived);
-
-    _updateState(_state.copyWith(
-      clockOffsetMs: (_clock.precisionUs / 1000).round(),
-      clockSamples: _clock.sampleCount,
-    ));
+    // Hand the parsed sample to the burst driver, which keeps the
+    // best-RTT sample of the burst and only feeds that one into the
+    // filter. The state-update callback wired in [_wireTimeBurst] runs
+    // when the burst completes.
+    _timeBurst.onTimeResponse(offset, delay ~/ 2, clientReceived);
   }
 
   void _handleStreamStart(Map<String, dynamic> payload) {
@@ -636,28 +650,20 @@ class SendspinProtocol {
   // Clock sync
   // -------------------------------------------------------------------------
 
-  /// Starts periodic clock synchronization (every 2 seconds, burst of 5).
+  /// Starts the burst-strategy clock-sync driver.
+  ///
+  /// Per the upstream `Sendspin/time-filter` README: 8 NTP exchanges sent
+  /// sequentially every ~10 seconds, only the lowest-`max_error` sample of
+  /// each burst is fed to the Kalman filter. Sending in parallel and
+  /// updating on every reply violates the filter's measurement-independence
+  /// assumption on TCP/WebSocket transports.
   void startClockSync() {
-    stopClockSync();
-    _clockSyncTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      _sendTimeBurst();
-    });
+    _timeBurst.start();
   }
 
-  void _sendTimeBurst() {
-    for (int i = 0; i < 5; i++) {
-      Future.delayed(Duration(milliseconds: i * 20), () {
-        if (_clockSyncTimer == null) return; // cancelled
-        final clientTransmittedUs = DateTime.now().microsecondsSinceEpoch;
-        onSendText?.call(buildClientTime(clientTransmittedUs));
-      });
-    }
-  }
-
-  /// Stops clock synchronization.
+  /// Stops the burst-strategy clock-sync driver.
   void stopClockSync() {
-    _clockSyncTimer?.cancel();
-    _clockSyncTimer = null;
+    _timeBurst.stop();
   }
 
   // -------------------------------------------------------------------------
@@ -685,7 +691,7 @@ class SendspinProtocol {
   /// Stops all periodic timers and resets the clock so nothing is sent
   /// on the new socket before the server/hello handshake completes.
   void resetForNewConnection() {
-    stopClockSync();
+    _timeBurst.reset();
     _stopStateReporting();
     _clock.reset();
   }
