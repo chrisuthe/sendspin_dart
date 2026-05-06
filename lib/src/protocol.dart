@@ -248,7 +248,12 @@ class SendspinProtocol {
       payload['player@v1_support'] = {
         'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
         'buffer_capacity': _computeBufferCapacityBytes(),
-        'supported_commands': ['volume', 'mute', 'set_static_delay'],
+        // Spec: player@v1_support.supported_commands is a subset of
+        // {'volume', 'mute'}. set_static_delay belongs in client/state's
+        // player.supported_commands, not in the hello support object.
+        // MA's Sendspin server closes the connection (WS close 1000) on
+        // hellos that advertise set_static_delay here.
+        'supported_commands': ['volume', 'mute'],
       };
     }
 

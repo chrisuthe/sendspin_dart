@@ -134,6 +134,31 @@ void main() {
       protocol.dispose();
     });
 
+    test(
+      'client/hello player@v1_support.supported_commands is the spec-mandated '
+      "subset of {'volume', 'mute'} and excludes set_static_delay",
+      () {
+        // Per the Sendspin spec, player@v1_support.supported_commands is a
+        // subset of {'volume', 'mute'}. set_static_delay belongs in
+        // client/state's player.supported_commands. Music Assistant's
+        // Sendspin server closes the connection (WS close 1000) on hellos
+        // that advertise set_static_delay here, so this is enforced.
+        final protocol = SendspinProtocol(
+          playerName: 'Test',
+          clientId: 'test-id',
+          bufferSeconds: 5,
+        );
+        final parsed =
+            jsonDecode(protocol.buildClientHello()) as Map<String, dynamic>;
+        final support =
+            parsed['payload']['player@v1_support'] as Map<String, dynamic>;
+        final cmds = (support['supported_commands'] as List).cast<String>();
+        expect(cmds, isNot(contains('set_static_delay')));
+        expect(cmds.toSet().difference({'volume', 'mute'}), isEmpty);
+        protocol.dispose();
+      },
+    );
+
     test('emits onStreamConfig on stream/start without codec_header', () async {
       StreamConfig? receivedConfig;
       protocol.onStreamConfig = (config) => receivedConfig = config;

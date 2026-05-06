@@ -1,3 +1,18 @@
+## 0.0.6
+
+### client/hello spec compliance (BUGFIX)
+
+- Remove `set_static_delay` from `client/hello.player@v1_support.supported_commands`.
+  The Sendspin spec defines this list as a subset of `{'volume', 'mute'}`;
+  `set_static_delay` belongs in `client/state.player.supported_commands`
+  (where it remains correctly advertised). Two earlier commits attempted
+  this fix but only updated client/state, leaving the spec violation in
+  client/hello. Music Assistant's Sendspin server (`aiohttp` 3.13.5)
+  closes the WebSocket with code 1000 immediately on receiving a hello
+  with the disallowed command, producing a connect→disconnect loop on
+  every cycle. This was the root cause of the v0.0.4 / v0.0.5 handshake
+  regression against MA. Added a regression test in `protocol_test.dart`.
+
 ## 0.0.5
 
 ### Clock sync (time-filter conformance)
