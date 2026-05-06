@@ -88,7 +88,18 @@ class SendspinProtocol {
   final List<ArtworkChannel>? artworkChannels;
 
   final SendspinClock _clock = SendspinClock();
-  final SendspinTimeBurst _timeBurst = SendspinTimeBurst();
+
+  /// Monotonic time source for everything client-side: the `client/time`
+  /// `client_transmitted` value, the `server/time` reply's locally-recorded
+  /// receive timestamp (T4), and the burst module's slot timing. Switching
+  /// to a [Stopwatch] (vs `DateTime.now().microsecondsSinceEpoch`) protects
+  /// the Kalman filter from OS NTP corrections and DST jumps that would
+  /// otherwise feed into `time_added` and explode the predicted covariance.
+  /// The wire-format `client_transmitted` is opaque to the server — it just
+  /// echoes it back as `T1` in the round-trip math, so the Stopwatch's
+  /// process-relative epoch does not affect the protocol.
+  final Stopwatch _stopwatch = Stopwatch()..start();
+  late final SendspinTimeBurst _timeBurst;
 
   int _staticDelayMs = 0;
   bool _pipelineError = false;
@@ -162,8 +173,15 @@ class SendspinProtocol {
     }
     _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
     _state = _state.copyWith(staticDelayMs: _staticDelayMs);
+    _timeBurst = SendspinTimeBurst(now: nowUs);
     _wireTimeBurst();
   }
+
+  /// Local monotonic clock in microseconds. All client-side timestamps
+  /// (filter `time_added`, NTP `client_transmitted`/`client_received`, and
+  /// the output domain of [SendspinClock.computeClientTime]) live in this
+  /// domain.
+  int nowUs() => _stopwatch.elapsedMicroseconds;
 
   void _wireTimeBurst() {
     _timeBurst.onSendTimeMessage = (clientTransmittedUs) {
@@ -445,7 +463,7 @@ class SendspinProtocol {
   void _handleServerTime(Map<String, dynamic> payload) {
     final serverReceived = payload['server_received'] as int? ?? 0;
     final serverTransmitted = payload['server_transmitted'] as int? ?? 0;
-    final clientReceived = DateTime.now().microsecondsSinceEpoch;
+    final clientReceived = nowUs();
     final clientTransmitted = payload['client_transmitted'] as int? ?? 0;
 
     // NTP-style offset and round-trip delay.

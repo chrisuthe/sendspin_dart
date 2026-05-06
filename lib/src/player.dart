@@ -241,7 +241,15 @@ class SendspinPlayer {
   void _handleAudioFrame(AudioFrame frame) {
     if (_codec == null || _buffer == null) return;
     final samples = _codec!.decode(frame.audioData);
-    _buffer!.addChunk(frame.timestampUs, samples);
+    // Per Sendspin spec: audio chunks carry server-clock timestamps;
+    // clients must translate to the local clock via the time-filter
+    // before scheduling playback. Pre-sync the filter is identity
+    // (offset=0, _useDrift=false), so this is a no-op until the first
+    // burst converges. After convergence drift compensation moves out
+    // of the buffer's chase loop and into the filter where it belongs.
+    final clientTimestampUs =
+        protocol.clock.computeClientTime(frame.timestampUs);
+    _buffer!.addChunk(clientTimestampUs, samples);
     protocol.updatePipelineState(
         protocol.state.copyWith(bufferDepthMs: _buffer!.bufferDepthMs));
   }

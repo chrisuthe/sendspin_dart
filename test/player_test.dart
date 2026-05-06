@@ -650,5 +650,81 @@ void main() {
       expect(received!.timestampUs, 777);
       p.dispose();
     });
+
+    test(
+        'audio path is identity-equivalent before the clock is seeded '
+        '(no behaviour change in the first burst window)', () {
+      // computeClientTime is offset=0/no-drift before the first burst
+      // applies a sample, so the translation wiring is a no-op. This is
+      // a smoke test of the new code path, not a translation-correctness
+      // test (correctness is verified in clock_test.dart).
+      player.handleTextMessage(_serverHello());
+      player.handleTextMessage(_streamStart());
+      expect(player.protocol.clock.computeClientTime(123456789), 123456789);
+
+      final pcm = Int16List(24000);
+      for (int i = 0; i < pcm.length; i++) {
+        pcm[i] = 1234;
+      }
+      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+
+      final pulled = player.pullSamples(960);
+      expect(pulled.any((s) => s != 0), isTrue);
+    });
+
+    test(
+        'mid-stream clock convergence triggers a re-anchor on the next '
+        'translated chunk (proves _handleAudioFrame routes through '
+        'computeClientTime)', () {
+      // The wiring fix is observable when the clock domain shifts mid-
+      // stream: the FIRST chunk anchors with identity translation, then
+      // we seed a large offset, then a SECOND chunk lands in a different
+      // timestamp domain and trips the buffer's re-anchor. Without the
+      // wiring (raw frame.timestampUs flowing through), the second chunk
+      // would land in the SAME (server-time) domain as the first and no
+      // re-anchor would fire. So depth after the second pull
+      // distinguishes the two code paths.
+      player.handleTextMessage(_serverHello());
+      player.handleTextMessage(_streamStart());
+
+      final pcm = Int16List(24000); // 250 ms @ 48k stereo
+      for (int i = 0; i < pcm.length; i++) {
+        pcm[i] = 1234;
+      }
+
+      // Step 1: anchor with identity translation (clock uninitialised).
+      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      // Pull once to anchor and start producing audio.
+      player.pullSamples(960);
+
+      // Step 2: seed a large offset (500 seconds). After this,
+      // computeClientTime(serverTs) = serverTs - 500_000_000 — far from
+      // the anchor's domain.
+      final clock = player.protocol.clock;
+      clock.update(500000000, 100, 1000);
+      clock.update(500000000, 100, 1001000);
+      expect(clock.computeClientTime(1500000) - 1500000, lessThan(-499000000),
+          reason: 'sanity: clock must be in non-identity state');
+
+      // Step 3: feed a second chunk. Its translated timestamp lands far
+      // in the past relative to the buffer's anchor (which was set in
+      // identity space). The buffer should detect this as either a
+      // late-chunk drop OR a re-anchor flush — either way, depth does
+      // NOT continue to grow as it would in the no-translation case.
+      final depthBeforeSecond = player.protocol.state.bufferDepthMs;
+      player.handleBinaryMessage(_binaryFrame(1500000, pcm));
+      // Either: (a) chunk dropped at addChunk, depth unchanged;
+      // (b) chunk inserted, next pull sees huge sync error, re-anchor
+      // flushes the buffer to depth 0.
+      // Under the old (no-translation) code: chunk inserted at server-ts
+      // 1_500_000, near the anchor at 1_000_000 + ~10 ms playhead →
+      // accepted normally, depth grows by 12000 samples.
+      player.pullSamples(960);
+      final depthAfter = player.protocol.state.bufferDepthMs;
+      expect(depthAfter, lessThan(depthBeforeSecond + 100),
+          reason: 'translation must shift the second chunk into a '
+              'different domain than the anchor — without it, depth would '
+              'grow by an additional ~125 ms of audio');
+    });
   });
 }

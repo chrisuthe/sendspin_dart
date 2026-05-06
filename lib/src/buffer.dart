@@ -66,6 +66,14 @@ class SendspinBuffer {
   int _playbackPositionUs = 0;
   int _lastReanchorUs = 0;
 
+  /// `true` once a re-anchor (mid-stream flush) has occurred. The cooldown
+  /// gate is meant to prevent re-anchor *thrashing*; the very first
+  /// re-anchor must always be allowed even if it happens early in
+  /// playback (e.g. the time-filter converging during a short startup
+  /// window and shifting all chunk timestamps from server-clock domain to
+  /// client-clock domain).
+  bool _hasReanchored = false;
+
   /// Accumulated fractional correction frames from micro-correction.
   double _correctionAccumulator = 0.0;
 
@@ -92,7 +100,24 @@ class SendspinBuffer {
   /// Add a decoded PCM chunk with a network timestamp in microseconds.
   ///
   /// Chunks with duplicate timestamps are rejected (the first one wins).
+  /// Once playback is anchored, chunks whose entire duration falls before
+  /// the current playhead are dropped (per Sendspin spec: "Audio chunks
+  /// may arrive with timestamps in the past due to network delays or
+  /// buffering; clients should drop these late chunks to maintain sync").
   void addChunk(int timestampUs, Int16List samples) {
+    // Drop late chunks once we have a playhead to compare against. Before
+    // anchoring, the first chunk in becomes the anchor regardless of its
+    // timestamp; we cannot meaningfully classify "late" until then.
+    if (_playbackAnchored && samples.isNotEmpty) {
+      final framesInChunk = samples.length ~/ channels;
+      if (framesInChunk > 0) {
+        final chunkDurationUs = (framesInChunk * 1000000) ~/ sampleRate;
+        if (timestampUs + chunkDurationUs <= _playbackPositionUs) {
+          return;
+        }
+      }
+    }
+
     // SplayTreeSet uses compareTo for equality — duplicate timestamps collide.
     // Wrap in a fresh object each time; if insertion fails it's a duplicate.
     final chunk = _AudioChunk(timestampUs, Int16List.fromList(samples));
@@ -160,7 +185,12 @@ class SendspinBuffer {
     // --- RE-ANCHOR ---
     if (absSyncError > _reanchorThresholdUs) {
       final int nowUs = _playbackPositionUs;
-      if ((nowUs - _lastReanchorUs).abs() > _reanchorCooldownUs) {
+      // Cooldown prevents thrashing on subsequent re-anchors but never
+      // blocks the FIRST one — convergence-time domain shifts can
+      // legitimately fire it well within the cooldown window.
+      if (!_hasReanchored ||
+          (nowUs - _lastReanchorUs).abs() > _reanchorCooldownUs) {
+        _hasReanchored = true;
         flush();
         return Int16List(count);
       }

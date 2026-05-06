@@ -37,6 +37,54 @@ around the old broken defaults should retest.
   should account for the slower cadence; `clockOffsetMs` (precision in ms)
   is the more robust health signal.
 
+### Wire the time-filter into the audio pipeline
+
+- `SendspinPlayer` now calls `SendspinClock.computeClientTime` on every
+  inbound audio frame's server-clock timestamp before handing the chunk
+  to the jitter buffer. Per the Sendspin spec ("Clients must translate
+  this server timestamp to their local clock using the offset computed
+  from clock synchronization"), this is the spec-mandated behaviour.
+  Before this change the filter ran but its outputs were never used by
+  the audio pipeline. Drift compensation now happens inside the Kalman
+  filter where it has 100+ samples of evidence behind it, instead of
+  being chased sample-by-sample by the buffer's micro-correction loop.
+- All client-side timestamps used by the protocol — the filter's
+  `time_added`, the NTP `client_transmitted` value sent on the wire, and
+  the locally-recorded `client_received` (T4) — now derive from a single
+  long-lived `Stopwatch` (monotonic). Wall-clock-derived timestamps would
+  feed OS NTP corrections and DST jumps into the filter's `dt`, blowing
+  up the predicted covariance.
+- New: `SendspinProtocol.nowUs()` exposes the protocol-side monotonic
+  clock for consumers that need to schedule events in the same domain
+  as the buffered chunks' translated timestamps.
+
+Behaviour notes:
+
+- During the first burst window (~10 s after handshake) the filter's
+  offset is still 0 and `_useDrift` is false, so `computeClientTime` is
+  identity. Audio playback is unchanged from before during this window.
+- When the first burst converges *while audio is already streaming*, the
+  buffer's chunk timestamps shift from server-time to client-time. The
+  buffer's re-anchor mechanism handles the one-time discontinuity by
+  flushing once and re-anchoring on the new domain — a single audible
+  glitch at convergence, not an ongoing problem.
+
+### Buffer: spec-compliant late-chunk drop and first-re-anchor fix
+
+- `SendspinBuffer.addChunk` now drops chunks whose entire duration falls
+  before the current playhead, per the Sendspin spec ("Audio chunks may
+  arrive with timestamps in the past due to network delays or buffering;
+  clients should drop these late chunks to maintain sync"). Before
+  translation was wired in, "late" was not meaningfully decidable
+  client-side; with `computeClientTime` now driving the timestamps the
+  drop is well-defined.
+- The re-anchor cooldown previously gated *every* re-anchor including
+  the first one, which meant the time-filter converging within ~5 s of
+  stream start could silently fail to flush — leaving the buffer
+  anchored in the wrong timestamp domain. The cooldown now only gates
+  *subsequent* re-anchors (its actual purpose: prevent thrashing). The
+  first re-anchor always fires.
+
 ## 0.0.4
 
 ### Multi-role support

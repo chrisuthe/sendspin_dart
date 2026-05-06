@@ -293,23 +293,62 @@ void main() {
       expect(buffer.bufferDepthMs, 0);
     });
 
-    test('re-anchor cooldown: within 5 s falls through to micro-correction',
-        () {
+    test(
+        'first re-anchor fires regardless of cooldown (filter convergence '
+        'mid-stream)', () {
+      // The cooldown is anti-thrash, not a startup grace period. When the
+      // time-filter converges shortly after stream start, all chunk
+      // timestamps shift domains; the buffer must flush immediately even
+      // if the cooldown window has not yet elapsed.
       final buffer = makeBuffer();
       buffer.addChunk(0, Int16List(57600));
       buffer.pullSamples(pullSize);
-      for (var i = 0; i < 40; i++) {
+      // ~520 ms of playback — well inside the 5 s cooldown window.
+      for (var i = 0; i < 51; i++) {
         buffer.pullSamples(pullSize);
       }
-      for (var i = 0; i < 11; i++) {
+      // Inject a chunk at ts=1 (~520 ms in the past): triggers re-anchor.
+      buffer.addChunk(1, Int16List(pullSize));
+      final depthBefore = buffer.bufferDepthMs;
+      expect(depthBefore, greaterThan(0),
+          reason: 'buffer should have data before pull');
+      buffer.pullSamples(pullSize);
+      // First re-anchor flushes — depth drops to zero.
+      expect(buffer.bufferDepthMs, equals(0),
+          reason: 'first re-anchor must always fire (no cooldown gate)');
+    });
+
+    test('subsequent re-anchors within 5 s are blocked by cooldown', () {
+      // After the first re-anchor has run, the cooldown gate engages and
+      // a second re-anchor within 5 s is suppressed in favour of
+      // micro-correction.
+      final buffer = makeBuffer();
+
+      // Burn the first re-anchor.
+      buffer.addChunk(0, Int16List(57600));
+      buffer.pullSamples(pullSize);
+      for (var i = 0; i < 51; i++) {
         buffer.pullSamples(pullSize);
       }
       buffer.addChunk(1, Int16List(pullSize));
+      buffer.pullSamples(pullSize); // flushes (first re-anchor)
+      expect(buffer.bufferDepthMs, equals(0));
+
+      // Re-prime, advance only a little (<5 s), then trigger another
+      // would-be-re-anchor. Cooldown must hold; depth should NOT go to
+      // zero, it should remain non-zero (micro-correction took over).
+      buffer.addChunk(2000000, Int16List(57600));
+      buffer.pullSamples(pullSize); // anchor on ts=2000000
+      for (var i = 0; i < 5; i++) {
+        buffer.pullSamples(pullSize);
+      }
+      buffer.addChunk(2000001, Int16List(pullSize));
       final depthBefore = buffer.bufferDepthMs;
+      expect(depthBefore, greaterThan(0));
       buffer.pullSamples(pullSize);
-      expect(buffer.bufferDepthMs, lessThanOrEqualTo(depthBefore));
-      expect(depthBefore, greaterThan(0),
-          reason: 'buffer should have data before pull');
+      // Cooldown should have suppressed the flush; depth must not be 0.
+      expect(buffer.bufferDepthMs, greaterThan(0),
+          reason: 'cooldown should suppress second re-anchor within 5s');
     });
 
     test('correction rate clamped to +-4 percent of pull size', () {
@@ -387,6 +426,53 @@ void main() {
       buffer.pullSamples(pullSize);
       buffer.pullSamples(pullSize);
       expect(buffer.syncErrorUs.abs(), lessThanOrEqualTo(2000));
+    });
+
+    group('late-chunk drop', () {
+      SendspinBuffer makeBuffer() => SendspinBuffer(
+            sampleRate: 48000,
+            channels: 2,
+            startupBufferMs: 0,
+            maxBufferMs: 15000,
+          );
+      const int pullSize = 960; // 480 frames @ 48k stereo = 10 ms
+
+      test('drops a chunk whose entire duration is before the playhead', () {
+        final buffer = makeBuffer();
+        buffer.addChunk(0, Int16List(pullSize)); // 10 ms chunk
+        // Anchor on ts=0 and advance the playhead a few hundred ms.
+        for (var i = 0; i < 30; i++) {
+          buffer.pullSamples(pullSize);
+        }
+        // Late chunk: ends at -1 us + 10 ms = 9999 us, well behind playhead
+        // (~290_000 us by now). Should be dropped.
+        final depthBefore = buffer.bufferDepthMs;
+        buffer.addChunk(-1, Int16List(pullSize));
+        expect(buffer.bufferDepthMs, equals(depthBefore),
+            reason: 'late chunk should be dropped, depth unchanged');
+      });
+
+      test('keeps a chunk whose tail extends past the playhead', () {
+        final buffer = makeBuffer();
+        buffer.addChunk(0, Int16List(pullSize));
+        // Advance just one pull (~10 ms).
+        buffer.pullSamples(pullSize);
+        // A chunk anchored 5 ms in the past but lasting 10 ms still has
+        // 5 ms of audio in the future — keep it.
+        final depthBefore = buffer.bufferDepthMs;
+        buffer.addChunk(5000, Int16List(pullSize));
+        expect(buffer.bufferDepthMs, greaterThan(depthBefore),
+            reason: 'partially-future chunk should be kept');
+      });
+
+      test('does not drop chunks before playback is anchored', () {
+        // Without an anchor we cannot meaningfully classify "late". The
+        // first chunk in becomes the anchor regardless of timestamp.
+        final buffer = makeBuffer();
+        buffer.addChunk(-1000000, Int16List(pullSize));
+        expect(buffer.bufferDepthMs, greaterThan(0),
+            reason: 'no anchor yet — chunk must be accepted as the anchor');
+      });
     });
   });
 }

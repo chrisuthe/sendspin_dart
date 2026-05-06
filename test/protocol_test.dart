@@ -644,6 +644,37 @@ void main() {
       protocol.stopClockSync();
     });
 
+    test('nowUs is monotonic and not derived from wall clock', () {
+      final t1 = protocol.nowUs();
+      final t2 = protocol.nowUs();
+      expect(t2, greaterThanOrEqualTo(t1));
+      // Compare against wall-clock epoch microseconds: a Stopwatch-derived
+      // source is many years smaller. Robust regardless of process uptime.
+      const tenYearsUs = 10 * 365 * 24 * 60 * 60 * 1000 * 1000;
+      final wall = DateTime.now().microsecondsSinceEpoch;
+      expect(wall - t1, greaterThan(tenYearsUs),
+          reason: 'monotonic source must not be wall-clock-derived');
+    });
+
+    test(
+        'client/time payload uses the monotonic time source, '
+        'not wall clock', () {
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.startClockSync();
+      // The first slot fires synchronously on start.
+      final clientTime = sent.firstWhere((m) => m.contains('"client/time"'));
+      final parsed = jsonDecode(clientTime) as Map<String, dynamic>;
+      final payload = parsed['payload'] as Map<String, dynamic>;
+      final clientTransmitted = payload['client_transmitted'] as int;
+      const tenYearsUs = 10 * 365 * 24 * 60 * 60 * 1000 * 1000;
+      final wall = DateTime.now().microsecondsSinceEpoch;
+      expect(wall - clientTransmitted, greaterThan(tenYearsUs),
+          reason: 'client_transmitted must come from the Stopwatch, '
+              'not DateTime.now()');
+      protocol.stopClockSync();
+    });
+
     test('stopClockSync prevents further client/time sends', () async {
       final sent = <String>[];
       protocol.onSendText = sent.add;
