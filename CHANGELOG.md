@@ -1,4 +1,4 @@
-## Unreleased
+## 0.0.5
 
 ### Clock sync (time-filter conformance)
 
