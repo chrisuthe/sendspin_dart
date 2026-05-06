@@ -117,9 +117,17 @@ class SendspinMetadataProgress {
 
 /// Now-playing metadata reported via server/state.
 ///
-/// All fields are optional. When the server sends a server/state with a
-/// metadata object, this replaces the previous snapshot in full — any
-/// field not present in the new message is treated as cleared.
+/// Per the Sendspin spec, the metadata sub-object is delta-encoded: the
+/// server only includes fields that have changed, and the client merges
+/// updates onto its existing snapshot via [mergeDelta]. The aiosendspin
+/// reference implementation enforces this with an `UndefinedField`
+/// sentinel and `omit_default = True` serialization, so unchanged
+/// fields are absent from the wire JSON entirely.
+///
+/// Field-presence semantics:
+///   - **absent in JSON** → keep existing value
+///   - **`null` in JSON**  → clear (set to null / [SendspinRepeatMode.unknown])
+///   - **value in JSON**   → replace
 class SendspinMetadata {
   /// Server-clock microsecond timestamp at which this metadata (and any
   /// embedded progress) becomes valid. May be 0 if the server omitted it.
@@ -148,6 +156,59 @@ class SendspinMetadata {
     this.repeat = SendspinRepeatMode.unknown,
     this.shuffle,
   });
+
+  /// Apply a server/state metadata delta on top of this snapshot.
+  ///
+  /// [json] is the raw `metadata` sub-object from the wire payload, kept
+  /// as a [Map] so absent keys can be distinguished from explicitly-null
+  /// values via [Map.containsKey] — that distinction is lost once values
+  /// are unwrapped through `as String?`.
+  ///
+  /// The [progress] sub-object is treated atomically per the server's
+  /// emit pattern: `aiosendspin` only emits a complete `Progress` (all
+  /// three fields populated) or omits it / sets it to `null`, never a
+  /// partial `Progress`.
+  SendspinMetadata mergeDelta(Map<String, dynamic> json) {
+    return SendspinMetadata(
+      timestamp: json.containsKey('timestamp')
+          ? (json['timestamp'] as num?)?.toInt() ?? 0
+          : timestamp,
+      title: json.containsKey('title') ? json['title'] as String? : title,
+      artist: json.containsKey('artist') ? json['artist'] as String? : artist,
+      albumArtist: json.containsKey('album_artist')
+          ? json['album_artist'] as String?
+          : albumArtist,
+      album: json.containsKey('album') ? json['album'] as String? : album,
+      artworkUrl: json.containsKey('artwork_url')
+          ? json['artwork_url'] as String?
+          : artworkUrl,
+      year: json.containsKey('year')
+          ? (json['year'] as num?)?.toInt()
+          : year,
+      track: json.containsKey('track')
+          ? (json['track'] as num?)?.toInt()
+          : track,
+      progress: json.containsKey('progress')
+          ? _parseProgress(json['progress'] as Map<String, dynamic>?)
+          : progress,
+      repeat: json.containsKey('repeat')
+          ? SendspinRepeatMode.fromWire(json['repeat'] as String?)
+          : repeat,
+      shuffle: json.containsKey('shuffle')
+          ? json['shuffle'] as bool?
+          : shuffle,
+    );
+  }
+
+  static SendspinMetadataProgress? _parseProgress(
+      Map<String, dynamic>? json) {
+    if (json == null) return null;
+    return SendspinMetadataProgress(
+      trackProgress: (json['track_progress'] as num?)?.toInt() ?? 0,
+      trackDuration: (json['track_duration'] as num?)?.toInt() ?? 0,
+      playbackSpeed: (json['playback_speed'] as num?)?.toInt() ?? 1000,
+    );
+  }
 }
 
 /// Controller capabilities reported via server/state. Describes what

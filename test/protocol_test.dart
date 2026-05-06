@@ -1173,6 +1173,181 @@ void main() {
       expect(p.state.metadata!.year, 2023);
       expect(p.state.metadata!.track, 2);
     });
+
+    // -----------------------------------------------------------------
+    // Delta-encoding semantics (spec compliance):
+    //   absent → keep, null → clear, value → replace.
+    // The aiosendspin server emits metadata as a delta (UndefinedField
+    // sentinel + omit_default) so a partial `metadata` sub-object on the
+    // wire is the rule, not the exception. The pre-0.0.7 implementation
+    // did wholesale replacement and dropped fields the server didn't
+    // re-send — most visibly artwork_url disappearing on a progress
+    // update mid-track.
+    // -----------------------------------------------------------------
+
+    test(
+      'absent fields preserve the existing snapshot value (artwork '
+      'survives a title-only update)',
+      () {
+        // Initial: full metadata.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {
+              'title': 'Old Title',
+              'artist': 'Old Artist',
+              'artwork_url': 'http://x/cover.png',
+            },
+          },
+        }));
+        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png');
+
+        // Delta: title-only change. artwork_url is absent, must be kept.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {'title': 'New Title'},
+          },
+        }));
+        expect(p.state.metadata!.title, 'New Title');
+        expect(p.state.metadata!.artist, 'Old Artist',
+            reason: 'absent artist must keep prior value');
+        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png',
+            reason: 'absent artwork_url must keep prior value');
+      },
+    );
+
+    test(
+      'explicit null clears the field (artwork transitions to none on '
+      "an explicit 'artwork_url': null)",
+      () {
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {
+              'title': 'Song',
+              'artwork_url': 'http://x/cover.png',
+            },
+          },
+        }));
+        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png');
+
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {'artwork_url': null},
+          },
+        }));
+        expect(p.state.metadata!.title, 'Song',
+            reason: 'absent title must keep prior value');
+        expect(p.state.metadata!.artworkUrl, isNull,
+            reason: 'explicit null artwork_url must clear');
+      },
+    );
+
+    test(
+      'absent progress keeps prior progress; explicit null clears it',
+      () {
+        // Seed progress.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {
+              'progress': {
+                'track_progress': 1000,
+                'track_duration': 60000,
+                'playback_speed': 1000,
+              },
+            },
+          },
+        }));
+        expect(p.state.metadata!.progress, isNotNull);
+
+        // Title-only delta: progress absent, must be kept.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {'title': 'X'},
+          },
+        }));
+        expect(p.state.metadata!.progress, isNotNull,
+            reason: 'absent progress must keep prior value');
+
+        // Explicit null progress: cleared.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {'progress': null},
+          },
+        }));
+        expect(p.state.metadata!.progress, isNull,
+            reason: 'explicit null progress must clear');
+      },
+    );
+
+    test(
+      'cleared_update (every field explicitly null) clears all metadata',
+      () {
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {
+              'title': 'Song',
+              'artist': 'Artist',
+              'artwork_url': 'http://x',
+              'repeat': 'one',
+            },
+          },
+        }));
+        expect(p.state.metadata!.title, 'Song');
+
+        // Mirror what aiosendspin's Metadata.cleared_update emits.
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': {
+            'metadata': {
+              'title': null,
+              'artist': null,
+              'album_artist': null,
+              'album': null,
+              'artwork_url': null,
+              'year': null,
+              'track': null,
+              'progress': null,
+              'repeat': null,
+              'shuffle': null,
+            },
+          },
+        }));
+        expect(p.state.metadata!.title, isNull);
+        expect(p.state.metadata!.artist, isNull);
+        expect(p.state.metadata!.artworkUrl, isNull);
+        expect(p.state.metadata!.repeat, SendspinRepeatMode.unknown);
+      },
+    );
+
+    test('mergeDelta on the model directly is correct (unit-level)', () {
+      const initial = SendspinMetadata(
+        title: 'A',
+        artist: 'B',
+        artworkUrl: 'http://x',
+        repeat: SendspinRepeatMode.all,
+      );
+      final keep = initial.mergeDelta(<String, dynamic>{});
+      expect(keep.title, 'A');
+      expect(keep.artist, 'B');
+      expect(keep.artworkUrl, 'http://x');
+      expect(keep.repeat, SendspinRepeatMode.all);
+
+      final clearOne = initial.mergeDelta({'artwork_url': null});
+      expect(clearOne.title, 'A');
+      expect(clearOne.artworkUrl, isNull);
+
+      final replaceOne = initial.mergeDelta({'title': 'C'});
+      expect(replaceOne.title, 'C');
+      expect(replaceOne.artist, 'B');
+      expect(replaceOne.artworkUrl, 'http://x');
+    });
   });
 
   group('server/state controller', () {

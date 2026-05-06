@@ -1,3 +1,35 @@
+## 0.0.7
+
+### server/state metadata delta semantics (BUGFIX)
+
+- `_handleServerState` now treats the `metadata` sub-object as
+  delta-encoded, per the Sendspin spec and the aiosendspin reference
+  implementation. Previously, every metadata update did wholesale
+  snapshot replacement, dropping fields the server didn't re-send. The
+  most visible casualty: `artwork_url` would disappear on the next
+  title-only or progress-only update mid-track, even though the spec
+  explicitly says absent fields must be preserved.
+- New `SendspinMetadata.mergeDelta(Map<String, dynamic> json)` returns
+  the merged result. Field-presence semantics:
+  - **absent in JSON** → keep existing value
+  - **`null` in JSON**  → clear (set to `null` / `RepeatMode.unknown`)
+  - **value in JSON**   → replace
+  Implemented by checking `Map.containsKey` per field — the absent /
+  null distinction is lost once values are unwrapped through
+  `as String?`, so the raw map has to be passed in.
+- The `progress` sub-object is treated atomically: aiosendspin only
+  emits a complete `Progress` (all three fields) or omits / nulls it,
+  never a partial. So we replace the whole `progress` on present-with-
+  value, keep on absent, and clear on explicit null.
+- The `controller` sub-object is *not* delta-encoded —
+  `ControllerStatePayload` in aiosendspin has no `omit_default` /
+  `omit_none` config and all required non-nullable fields, so it's
+  always emitted as a complete snapshot. `_handleServerState` continues
+  to parse it wholesale, unchanged.
+- Added regression tests covering: absent-keeps, null-clears, partial
+  updates after a full snapshot, `cleared_update` (every field null),
+  and a unit test on `SendspinMetadata.mergeDelta` itself.
+
 ## 0.0.6
 
 ### client/hello spec compliance (BUGFIX)
