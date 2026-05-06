@@ -72,5 +72,63 @@ void main() {
       final serverTime = clock.computeServerTime(39500000);
       expect((serverTime - 39505000).abs(), lessThan(700));
     });
+
+    test('getError returns -1 before any measurement', () {
+      final clock = SendspinClock();
+      expect(clock.getError(), equals(-1));
+    });
+
+    test('precisionUs is infinite before any measurement', () {
+      final clock = SendspinClock();
+      expect(clock.precisionUs, equals(double.infinity));
+    });
+
+    test('maxErrorScale halves the post-init error vs unscaled', () {
+      // After the first update, the upstream filter sets:
+      //   offset_covariance = (max_error * max_error_scale)^2
+      // So sqrt(cov) == max_error * max_error_scale.
+      final scaled = SendspinClock(); // default 0.5
+      final unscaled = SendspinClock(maxErrorScale: 1.0);
+      scaled.update(0, 100, 1);
+      unscaled.update(0, 100, 1);
+      expect(scaled.getError(), equals(50));
+      expect(unscaled.getError(), equals(100));
+    });
+
+    test(
+        'default adaptiveCutoff (3.0) does NOT forget on 2x max_error '
+        'residuals', () {
+      // With cutoff=3.0, residuals up to 3x max_error are absorbed by
+      // ordinary Kalman update. If we fed regular 2x-max_error noise into
+      // a (legacy) cutoff=0.75 filter, forgetting would fire constantly
+      // and the variance would balloon. With the upstream default it
+      // settles below the initial bound.
+      final clock = SendspinClock(minSamples: 10);
+      for (int i = 0; i < 60; i++) {
+        // Alternate +200 and -200 around the true offset (max_error=100,
+        // so |residual| ~= 2*max_error each step — well under the 3x cutoff).
+        final m = 1000 + ((i.isEven) ? 200 : -200);
+        clock.update(m, 100, i * 1000000);
+      }
+      // After 60 samples of 2*max_error noise, the filter should still be
+      // tracking the centre and not have its variance blown up by spurious
+      // forgetting.
+      expect(clock.getError(), lessThan(150));
+      final serverTime = clock.computeServerTime(60 * 1000000);
+      expect((serverTime - (60 * 1000000 + 1000)).abs(), lessThan(500));
+    });
+
+    test('stable offset converges to small precision under upstream defaults',
+        () {
+      // Tighter than the legacy tolerance — proves the new defaults
+      // actually converge.
+      final clock = SendspinClock();
+      for (int i = 0; i < 20; i++) {
+        clock.update(2000, 50, 100000 + i * 10000000);
+      }
+      final serverTime = clock.computeServerTime(1000000);
+      expect((serverTime - 1002000).abs(), lessThan(10));
+      expect(clock.getError(), lessThan(15));
+    });
   });
 }

@@ -1,3 +1,25 @@
+## Unreleased
+
+### Clock sync (time-filter conformance)
+
+- Bring `SendspinClock` defaults into line with the upstream `Sendspin/time-filter`
+  reference (April 2026 revision): `processStdDev=0.0`, `driftProcessStdDev=1e-11`,
+  `forgetFactor=2.0`, `adaptiveCutoff=3.0`, `driftSignificanceThreshold=2.0`.
+  The legacy values were inherited from an older ESPHome snapshot and were
+  algorithmically incorrect (cutoff and forget factor were in opposite regimes,
+  causing forgetting to fire on noise while doing almost nothing when it did).
+- Add `maxErrorScale` parameter (default `0.5`) that scales `max_error` before
+  it is used as the measurement standard deviation, matching the upstream
+  contract. The (unscaled) `max_error` is still used as the adaptive-forgetting
+  cutoff reference.
+- `getError()` now returns `-1` before the first measurement (covariance starts
+  at infinity) instead of throwing on `infinity.round()`.
+
+Behaviour change: callers constructing `SendspinClock()` without arguments
+will see materially different filter dynamics. The new defaults converge
+faster and recover from clock disruptions much more quickly. Anyone tuning
+around the old broken defaults should retest.
+
 ## 0.0.4
 
 ### Multi-role support
