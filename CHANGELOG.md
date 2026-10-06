@@ -1,3 +1,22 @@
+## Unreleased (Sendspin 1.0.0-rc1)
+
+Breaking: this release moves the library to the Sendspin 1.0.0-rc1 wire
+protocol. It cannot talk to pre-rc1 servers.
+
+### Player audio chunks
+
+- Audio chunks (binary ID 4) now use the 13-byte rc1 header. `AudioFrame`
+  gains `sendAheadUs`, and chunks shorter than 13 bytes are rejected.
+- Binary IDs 5-7 belong to the player role but are not audio; they are
+  ignored instead of being handed to the decoder.
+- New `ArrivalDelayTracker` sizes `min_buffer_ms` from the upper tail of
+  chunk arrival delay (`arrival - computeClientTime(timestamp - send_ahead)`),
+  skipping saturated `send_ahead` values and samples taken before the time
+  filter is synchronized. Exposed as `SendspinProtocol.measuredMinBufferMs`
+  and `onArrivalDelay`.
+- New `SendspinClock.isSynchronized` (two samples and a finite variance).
+- `SendspinProtocol` accepts an optional `now` clock source.
+
 ## 0.0.7
 
 ### server/state metadata delta semantics (BUGFIX)

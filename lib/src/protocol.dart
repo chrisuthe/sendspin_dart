@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'arrival_delay.dart';
 import 'models.dart';
 import 'clock.dart';
 import 'time_burst.dart';
@@ -17,24 +18,43 @@ enum SendspinGoodbyeReason {
   const SendspinGoodbyeReason(this.wireValue);
 }
 
-/// Binary frame type IDs per Sendspin spec. Player frames are type 4
-/// (bits 000001_xx). Artwork is 8-11, visualizer is 16-23.
+/// Binary message IDs per Sendspin spec. The player role owns 4-7, of which
+/// only 4 (audio chunk) is defined. Artwork is 8-11, visualizer is 16-23.
 const int _binaryTypePlayerMin = 4;
 const int _binaryTypePlayerMax = 7;
+const int _binaryTypeAudioChunk = 4;
 const int _binaryTypeArtworkMin = 8;
 const int _binaryTypeArtworkMax = 11;
 
-/// A parsed binary audio frame from the Sendspin protocol.
+/// Audio chunk header: message type, int64 timestamp, uint32 send_ahead.
+const int _audioChunkHeaderSize = 13;
+
+/// A parsed binary audio chunk from the Sendspin protocol.
 class AudioFrame {
+  /// `send_ahead` values that report "no lead measured" rather than a lead of
+  /// that length; chunks carrying either are not usable as delay samples.
+  static const int sendAheadSaturatedLow = 0;
+  static const int sendAheadSaturatedHigh = 0xFFFFFFFF;
+
   final int type;
   final int timestampUs;
+
+  /// Microseconds from the server's transmission of this chunk to
+  /// [timestampUs]. Carries no scheduling meaning.
+  final int sendAheadUs;
   final Uint8List audioData;
 
   const AudioFrame({
     required this.type,
     required this.timestampUs,
+    this.sendAheadUs = sendAheadSaturatedLow,
     required this.audioData,
   });
+
+  /// Whether [sendAheadUs] is a real measurement.
+  bool get hasSendAhead =>
+      sendAheadUs != sendAheadSaturatedLow &&
+      sendAheadUs != sendAheadSaturatedHigh;
 }
 
 /// Device info sent in the client/hello handshake.
@@ -99,7 +119,10 @@ class SendspinProtocol {
   /// echoes it back as `T1` in the round-trip math, so the Stopwatch's
   /// process-relative epoch does not affect the protocol.
   final Stopwatch _stopwatch = Stopwatch()..start();
+  final int Function()? _now;
   late final SendspinTimeBurst _timeBurst;
+
+  final ArrivalDelayTracker _arrivalDelay = ArrivalDelayTracker();
 
   int _staticDelayMs = 0;
   bool _pipelineError = false;
@@ -128,6 +151,11 @@ class SendspinProtocol {
 
   /// Called when a binary audio frame is received.
   void Function(AudioFrame frame)? onAudioFrame;
+
+  /// Called with each audio chunk's arrival delay in microseconds:
+  /// `arrival - computeClientTime(timestamp - send_ahead)`. Not called for
+  /// chunks with a saturated `send_ahead` or before the clock is synchronized.
+  void Function(int delayUs)? onArrivalDelay;
 
   /// Called when a binary artwork frame is received (artwork role).
   void Function(ArtworkFrame frame)? onArtworkFrame;
@@ -162,7 +190,8 @@ class SendspinProtocol {
     this.roles = const {SendspinRole.player},
     this.artworkChannels,
     int initialStaticDelayMs = 0,
-  }) {
+    int Function()? now,
+  }) : _now = now {
     if (roles.contains(SendspinRole.artwork) &&
         (artworkChannels == null || artworkChannels!.isEmpty)) {
       throw ArgumentError(
@@ -181,7 +210,7 @@ class SendspinProtocol {
   /// (filter `time_added`, NTP `client_transmitted`/`client_received`, and
   /// the output domain of [SendspinClock.computeClientTime]) live in this
   /// domain.
-  int nowUs() => _stopwatch.elapsedMicroseconds;
+  int nowUs() => _now?.call() ?? _stopwatch.elapsedMicroseconds;
 
   void _wireTimeBurst() {
     _timeBurst.onSendTimeMessage = (clientTransmittedUs) {
@@ -211,6 +240,10 @@ class SendspinProtocol {
 
   /// Current static delay in milliseconds (set by server/command).
   int get staticDelayMs => _staticDelayMs;
+
+  /// `min_buffer_ms` sized from measured audio-chunk arrival delay, or null
+  /// until enough chunks have been observed.
+  int? get measuredMinBufferMs => _arrivalDelay.minBufferMs;
 
   // -------------------------------------------------------------------------
   // State management
@@ -607,48 +640,67 @@ class SendspinProtocol {
   // Binary message handling
   // -------------------------------------------------------------------------
 
-  /// Handles an incoming binary frame, dispatching by type range and active
-  /// roles.
+  /// Handles an incoming binary message, dispatching by message ID and
+  /// active roles.
   ///
-  /// Player frames (type 4-7) are forwarded to [onAudioFrame] only when the
-  /// [SendspinRole.player] role is active. Artwork frames (type 8-11) are
-  /// forwarded to [onArtworkFrame] only when [SendspinRole.artwork] is active.
-  /// All other type ranges are silently dropped.
+  /// Audio chunks (ID 4) are forwarded to [onAudioFrame] only when the
+  /// [SendspinRole.player] role is active. The remaining player IDs (5-7) are
+  /// not defined and are ignored. Artwork frames (ID 8-11) are forwarded to
+  /// [onArtworkFrame] only when [SendspinRole.artwork] is active. All other
+  /// IDs are silently dropped.
   void handleBinaryMessage(Uint8List data) {
-    if (data.length < 9) return;
-    final frame = parseBinaryFrame(data);
+    if (data.isEmpty) return;
+    final type = data[0];
 
-    if (frame.type >= _binaryTypePlayerMin &&
-        frame.type <= _binaryTypePlayerMax) {
-      if (roles.contains(SendspinRole.player)) {
-        onAudioFrame?.call(frame);
-      }
+    if (type >= _binaryTypePlayerMin && type <= _binaryTypePlayerMax) {
+      if (type != _binaryTypeAudioChunk) return;
+      if (data.length < _audioChunkHeaderSize) return;
+      if (!roles.contains(SendspinRole.player)) return;
+      final frame = parseBinaryFrame(data);
+      _measureArrivalDelay(frame);
+      onAudioFrame?.call(frame);
       return;
     }
 
-    if (frame.type >= _binaryTypeArtworkMin &&
-        frame.type <= _binaryTypeArtworkMax) {
+    if (type >= _binaryTypeArtworkMin && type <= _binaryTypeArtworkMax) {
+      if (data.length < 9) return;
       if (roles.contains(SendspinRole.artwork)) {
+        final view =
+            ByteData.view(data.buffer, data.offsetInBytes, data.lengthInBytes);
         onArtworkFrame?.call(ArtworkFrame(
-          channel: frame.type - _binaryTypeArtworkMin,
-          timestampUs: frame.timestampUs,
-          imageData: frame.audioData,
+          channel: type - _binaryTypeArtworkMin,
+          timestampUs: view.getInt64(1, Endian.big),
+          imageData: Uint8List.sublistView(data, 9),
         ));
       }
       return;
     }
   }
 
-  /// Parses a binary frame: byte 0 = message type, bytes 1-8 = BE int64
-  /// timestamp, bytes 9+ = audio data.
+  /// Records the chunk's arrival delay for sizing `min_buffer_ms`. Saturated
+  /// `send_ahead` values and samples taken before the time filter has
+  /// synchronized are not delay samples.
+  void _measureArrivalDelay(AudioFrame frame) {
+    if (!frame.hasSendAhead || !_clock.isSynchronized) return;
+    final arrivalUs = nowUs();
+    final transmittedUs =
+        _clock.computeClientTime(frame.timestampUs - frame.sendAheadUs);
+    final delayUs = arrivalUs - transmittedUs;
+    _arrivalDelay.addSample(delayUs: delayUs, nowUs: arrivalUs);
+    onArrivalDelay?.call(delayUs);
+  }
+
+  /// Parses an audio chunk: byte 0 = message type, bytes 1-8 = BE int64
+  /// timestamp, bytes 9-12 = BE uint32 send_ahead, bytes 13+ = audio data.
   static AudioFrame parseBinaryFrame(Uint8List frame) {
     final view =
         ByteData.view(frame.buffer, frame.offsetInBytes, frame.lengthInBytes);
-    final type = view.getUint8(0);
-    final timestampUs = view.getInt64(1, Endian.big);
-    final audioData = Uint8List.sublistView(frame, 9);
     return AudioFrame(
-        type: type, timestampUs: timestampUs, audioData: audioData);
+      type: view.getUint8(0),
+      timestampUs: view.getInt64(1, Endian.big),
+      sendAheadUs: view.getUint32(9, Endian.big),
+      audioData: Uint8List.sublistView(frame, _audioChunkHeaderSize),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -699,6 +751,7 @@ class SendspinProtocol {
     _timeBurst.reset();
     _stopStateReporting();
     _clock.reset();
+    _arrivalDelay.reset();
   }
 
   /// Cleans up timers and stream controller.

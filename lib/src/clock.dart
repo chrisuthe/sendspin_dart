@@ -84,6 +84,12 @@ class SendspinClock {
   /// [precisionUs] for that.
   bool get isConverged => _count >= _minSamplesForForgetting;
 
+  /// Whether the filter is ready to translate timestamps: at least two
+  /// measurements applied and a finite offset variance. This is the
+  /// "converged enough to begin scheduling playback" condition, matching
+  /// `is_synchronized` in the aiosendspin reference client.
+  bool get isSynchronized => _count >= 2 && _offsetCovariance.isFinite;
+
   // Immutable parameters
   final double _processVariance;
   final double _driftProcessVariance;

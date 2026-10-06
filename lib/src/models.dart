@@ -182,26 +182,20 @@ class SendspinMetadata {
       artworkUrl: json.containsKey('artwork_url')
           ? json['artwork_url'] as String?
           : artworkUrl,
-      year: json.containsKey('year')
-          ? (json['year'] as num?)?.toInt()
-          : year,
-      track: json.containsKey('track')
-          ? (json['track'] as num?)?.toInt()
-          : track,
+      year: json.containsKey('year') ? (json['year'] as num?)?.toInt() : year,
+      track:
+          json.containsKey('track') ? (json['track'] as num?)?.toInt() : track,
       progress: json.containsKey('progress')
           ? _parseProgress(json['progress'] as Map<String, dynamic>?)
           : progress,
       repeat: json.containsKey('repeat')
           ? SendspinRepeatMode.fromWire(json['repeat'] as String?)
           : repeat,
-      shuffle: json.containsKey('shuffle')
-          ? json['shuffle'] as bool?
-          : shuffle,
+      shuffle: json.containsKey('shuffle') ? json['shuffle'] as bool? : shuffle,
     );
   }
 
-  static SendspinMetadataProgress? _parseProgress(
-      Map<String, dynamic>? json) {
+  static SendspinMetadataProgress? _parseProgress(Map<String, dynamic>? json) {
     if (json == null) return null;
     return SendspinMetadataProgress(
       trackProgress: (json['track_progress'] as num?)?.toInt() ?? 0,
