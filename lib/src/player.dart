@@ -7,7 +7,7 @@ import 'buffer.dart';
 import 'codec.dart';
 import 'identity.dart';
 import 'models.dart';
-import 'psk.dart';
+import 'pairing.dart';
 
 /// High-level audio player that composes [SendspinProtocol] with a codec and
 /// jitter buffer to provide the full audio pipeline.
@@ -48,7 +48,7 @@ class SendspinPlayer {
     Set<SendspinRole> additionalRoles = const {},
     List<ArtworkChannel>? artworkChannels,
     required bool unpairedAccess,
-    List<SendspinPskCandidate> Function()? pskCandidates,
+    SendspinPairing? pairing,
     this.codecFactory,
     Set<SendspinPlayerCommand> supportedCommands = const {
       SendspinPlayerCommand.volume,
@@ -68,7 +68,7 @@ class SendspinPlayer {
           roles: {SendspinRole.player, ...additionalRoles},
           artworkChannels: artworkChannels,
           unpairedAccess: unpairedAccess,
-          pskCandidates: pskCandidates,
+          pairing: pairing,
           supportedCommands: supportedCommands,
           initialOutputDelayMs: initialOutputDelayMs,
           requiredLeadTimeMs: requiredLeadTimeMs,
@@ -109,6 +109,19 @@ class SendspinPlayer {
 
   bool get unpairedAccess => protocol.unpairedAccess;
   set unpairedAccess(bool enabled) => protocol.unpairedAccess = enabled;
+
+  SendspinPairing get pairing => protocol.pairing;
+  String get pairingToken => protocol.pairingToken;
+  void cancelPairing() => protocol.cancelPairing();
+  void rejectConcurrentPairing() => protocol.rejectConcurrentPairing();
+
+  void Function(String serverId)? get onPaired => protocol.onPaired;
+  set onPaired(void Function(String serverId)? cb) => protocol.onPaired = cb;
+
+  void Function(String reason)? get onPairingAborted =>
+      protocol.onPairingAborted;
+  set onPairingAborted(void Function(String reason)? cb) =>
+      protocol.onPairingAborted = cb;
 
   String? get serverId => protocol.serverId;
   bool get isPaired => protocol.isPaired;
