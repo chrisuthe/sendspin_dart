@@ -89,6 +89,18 @@ protocol. It cannot talk to pre-rc1 servers.
   source. Removed from `SendspinBuffer`: `startupBufferMs`, `isInUnderrun`,
   and the fixed `sampleRate` / `channels` constructor arguments.
 
+### Controller role
+
+- `SendspinControllerInfo` gains `repeat`, `shuffle` and `seekMaxMs`, which
+  rc1 reports in the controller state. `repeat` and `shuffle` are removed
+  from `SendspinMetadata`, where rc1 no longer defines them.
+- New `sendControllerSeek(positionMs)` (checked against `seek_max_ms`) and
+  `sendControllerSeekRelative(offsetMs)`.
+- A controller command must be in `supported_commands` of the latest
+  controller state: `sendController*` now throws `StateError` otherwise,
+  including before any controller state has arrived. Use
+  `canSendControllerCommand(name)` to drive UI enablement.
+
 ### Pairing
 
 - The Pairing PSK method is implemented. After a pairing `server/activate`

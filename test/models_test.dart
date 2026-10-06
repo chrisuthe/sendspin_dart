@@ -32,7 +32,7 @@ void main() {
   });
 
   group('SendspinMetadata', () {
-    test('defaults: all-null fields and repeat is unknown', () {
+    test('defaults: all-null fields', () {
       const m = SendspinMetadata();
       expect(m.timestamp, 0);
       expect(m.title, isNull);
@@ -43,8 +43,6 @@ void main() {
       expect(m.year, isNull);
       expect(m.track, isNull);
       expect(m.progress, isNull);
-      expect(m.shuffle, isNull);
-      expect(m.repeat, SendspinRepeatMode.unknown);
     });
   });
 

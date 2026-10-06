@@ -875,6 +875,7 @@ void main() {
     });
 
     test('a held command is dropped if its role is removed meanwhile', () {
+      allowControllerCommands(protocol);
       server.startRehandshake(_pairingPsk, 'pr');
       protocol.sendControllerCommand('next');
       server.sendJson('server/activate', {
@@ -885,6 +886,7 @@ void main() {
     });
 
     test('a held command is sent if its role stays active', () {
+      allowControllerCommands(protocol);
       server.startRehandshake(_pairingPsk, 'pr');
       protocol.sendControllerCommand('next');
       server.sendJson('server/activate', {

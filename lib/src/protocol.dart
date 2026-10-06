@@ -751,52 +751,74 @@ class SendspinProtocol {
     }
   }
 
-  /// Sends a controller command (e.g. 'play', 'pause', 'stop', 'next').
-  ///
-  /// Throws [StateError] if the controller role is not active.
-  void sendControllerCommand(String command) {
+  /// Whether [command] is in `supported_commands` of the latest controller
+  /// state, i.e. whether it may be sent right now.
+  bool canSendControllerCommand(String command) =>
+      isRoleActive(SendspinRole.controller) &&
+      (_state.controller?.supportedCommands.contains(command) ?? false);
+
+  /// Sends a `client/command` controller object. A command must be listed in
+  /// `supported_commands` of the latest controller state.
+  void _sendControllerCommand(String command,
+      [Map<String, dynamic> parameters = const {}]) {
     _requireRole(SendspinRole.controller);
+    if (!canSendControllerCommand(command)) {
+      throw StateError(
+          "The server does not currently list '$command' in the controller's "
+          'supported_commands');
+    }
     _sendApplication(
-        jsonEncode({
-          'type': 'client/command',
-          'payload': {
-            'controller': {'command': command},
-          },
-        }),
-        role: SendspinRole.controller);
+      jsonEncode({
+        'type': 'client/command',
+        'payload': {
+          'controller': {'command': command, ...parameters},
+        },
+      }),
+      role: SendspinRole.controller,
+    );
   }
 
-  /// Sends a controller volume command (0-100).
+  /// Sends a controller command that takes no parameter: 'play', 'pause',
+  /// 'stop', 'next', 'previous', 'repeat_off', 'repeat_one', 'repeat_all',
+  /// 'shuffle', 'unshuffle' or 'switch'.
   ///
-  /// Throws [StateError] if the controller role is not active.
-  /// Throws [RangeError] if [volume] is outside 0-100.
+  /// Throws [StateError] if the controller role is not active or the server
+  /// does not currently list the command as supported.
+  void sendControllerCommand(String command) => _sendControllerCommand(command);
+
+  /// Sends a controller volume command (0-100) for the whole group.
+  ///
+  /// Throws [RangeError] if [volume] is outside 0-100, and [StateError] as
+  /// [sendControllerCommand] does.
   void sendControllerVolume(int volume) {
     _requireRole(SendspinRole.controller);
     RangeError.checkValueInInterval(volume, 0, 100, 'volume');
-    _sendApplication(
-        jsonEncode({
-          'type': 'client/command',
-          'payload': {
-            'controller': {'command': 'volume', 'volume': volume},
-          },
-        }),
-        role: SendspinRole.controller);
+    _sendControllerCommand('volume', {'volume': volume});
   }
 
-  /// Sends a controller mute command.
+  /// Sends a controller mute command for the whole group.
+  void sendControllerMute(bool mute) =>
+      _sendControllerCommand('mute', {'mute': mute});
+
+  /// Seeks to an absolute position in milliseconds, between 0 and the
+  /// `seek_max_ms` of the latest controller state.
   ///
-  /// Throws [StateError] if the controller role is not active.
-  void sendControllerMute(bool mute) {
+  /// Throws [RangeError] outside that range, and [StateError] as
+  /// [sendControllerCommand] does.
+  void sendControllerSeek(int positionMs) {
     _requireRole(SendspinRole.controller);
-    _sendApplication(
-        jsonEncode({
-          'type': 'client/command',
-          'payload': {
-            'controller': {'command': 'mute', 'mute': mute},
-          },
-        }),
-        role: SendspinRole.controller);
+    if (!canSendControllerCommand('seek')) {
+      throw StateError("The server does not currently support 'seek'");
+    }
+    RangeError.checkValueInInterval(
+        positionMs, 0, _state.controller?.seekMaxMs ?? 0, 'positionMs');
+    _sendControllerCommand('seek', {'position_ms': positionMs});
   }
+
+  /// Seeks by a signed offset in milliseconds from the current position
+  /// (positive forward, negative backward). The server clamps the result.
+  void sendControllerSeekRelative(int offsetMs) =>
+      _sendControllerCommand('seek_relative', {'offset_ms': offsetMs});
 
   /// Update volume from local UI and report to server.
   void updateVolume(double volume) {
@@ -1421,6 +1443,9 @@ class SendspinProtocol {
           rawCommands?.whereType<String>().toList() ?? const <String>[],
       volume: jsonInt(json['volume']) ?? 0,
       muted: jsonBool(json['muted']) ?? false,
+      repeat: SendspinRepeatMode.fromWire(jsonString(json['repeat'])),
+      shuffle: jsonBool(json['shuffle']) ?? false,
+      seekMaxMs: jsonInt(json['seek_max_ms']),
     );
   }
 

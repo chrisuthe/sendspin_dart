@@ -48,7 +48,7 @@ class SendspinGroupState {
   });
 }
 
-/// Repeat mode reported in server/state metadata.
+/// Repeat mode reported in the controller state.
 enum SendspinRepeatMode {
   off('off'),
   one('one'),
@@ -107,8 +107,6 @@ class SendspinMetadata {
   final int? year;
   final int? track;
   final SendspinMetadataProgress? progress;
-  final SendspinRepeatMode repeat;
-  final bool? shuffle;
 
   const SendspinMetadata({
     this.timestamp = 0,
@@ -120,8 +118,6 @@ class SendspinMetadata {
     this.year,
     this.track,
     this.progress,
-    this.repeat = SendspinRepeatMode.unknown,
-    this.shuffle,
   });
 
   /// Parses the `metadata` object of a server/state message.
@@ -136,8 +132,6 @@ class SendspinMetadata {
       year: jsonInt(json['year']),
       track: jsonInt(json['track']),
       progress: _parseProgress(jsonObject(json['progress'])),
-      repeat: SendspinRepeatMode.fromWire(jsonString(json['repeat'])),
-      shuffle: jsonBool(json['shuffle']),
     );
   }
 
@@ -151,18 +145,32 @@ class SendspinMetadata {
   }
 }
 
-/// Controller capabilities reported via server/state. Describes what
-/// commands this client may issue if it is acting as a controller, along
-/// with the current group volume/mute.
+/// Controller state reported via server/state: what this client may ask
+/// the server to do, and the group's volume, mute, repeat and shuffle.
 class SendspinControllerInfo {
+  /// Commands the server currently accepts. A command not listed here must
+  /// not be sent.
   final List<String> supportedCommands;
+
+  /// Volume of the whole group, 0-100.
   final int volume;
+
+  /// Mute state of the whole group.
   final bool muted;
+  final SendspinRepeatMode repeat;
+  final bool shuffle;
+
+  /// The furthest position a `seek` may target, in milliseconds. Present
+  /// whenever `seek` is supported; absent when the range is unknown.
+  final int? seekMaxMs;
 
   const SendspinControllerInfo({
     this.supportedCommands = const <String>[],
     this.volume = 0,
     this.muted = false,
+    this.repeat = SendspinRepeatMode.unknown,
+    this.shuffle = false,
+    this.seekMaxMs,
   });
 }
 

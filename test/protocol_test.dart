@@ -1563,6 +1563,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerCommand('play');
 
       expect(sent, hasLength(1));
@@ -1587,6 +1588,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerVolume(75);
 
       expect(sent, hasLength(1));
@@ -1609,6 +1611,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerMute(true);
 
       expect(sent, hasLength(1));
@@ -1679,6 +1682,7 @@ void main() {
         'switch',
       ];
       for (final cmd in commands) {
+        allowControllerCommands(p);
         p.sendControllerCommand(cmd);
       }
 
@@ -1704,7 +1708,9 @@ void main() {
       expect(() => p.sendControllerVolume(-1), throwsRangeError);
       expect(() => p.sendControllerVolume(101), throwsRangeError);
       // Boundary values should work
+      allowControllerCommands(p);
       p.sendControllerVolume(0);
+      allowControllerCommands(p);
       p.sendControllerVolume(100);
       p.dispose();
     });

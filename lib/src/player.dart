@@ -223,6 +223,12 @@ class SendspinPlayer {
   void sendControllerVolume(int volume) =>
       protocol.sendControllerVolume(volume);
   void sendControllerMute(bool mute) => protocol.sendControllerMute(mute);
+  void sendControllerSeek(int positionMs) =>
+      protocol.sendControllerSeek(positionMs);
+  void sendControllerSeekRelative(int offsetMs) =>
+      protocol.sendControllerSeekRelative(offsetMs);
+  bool canSendControllerCommand(String command) =>
+      protocol.canSendControllerCommand(command);
 
   /// Begins the connection by sending `client/init`.
   void start() => protocol.start();
