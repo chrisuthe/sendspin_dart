@@ -209,7 +209,7 @@ void main() {
 
     test('no client/state or client/time is sent', () {
       protocol.updateVolume(0.4);
-      protocol.setPipelineError(true);
+      protocol.setAvailable(false);
       protocol.startClockSync();
       expect(server.receivedJson, isEmpty);
     });

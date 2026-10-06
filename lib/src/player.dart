@@ -33,9 +33,8 @@ class SendspinPlayer {
 
   SendspinCodec? _codec;
   SendspinBuffer? _buffer;
-  Timer? _underrunPollTimer;
 
-  void Function(int delayMs)? _userOnStaticDelayChanged;
+  void Function(int delayMs)? _userOnOutputDelayChanged;
 
   SendspinPlayer({
     required String playerName,
@@ -51,7 +50,14 @@ class SendspinPlayer {
     required bool unpairedAccess,
     List<SendspinPskCandidate> Function()? pskCandidates,
     this.codecFactory,
-    int initialStaticDelayMs = 0,
+    Set<SendspinPlayerCommand> supportedCommands = const {
+      SendspinPlayerCommand.volume,
+      SendspinPlayerCommand.mute,
+      SendspinPlayerCommand.setOutputDelay,
+    },
+    int initialOutputDelayMs = 0,
+    int requiredLeadTimeMs = 250,
+    int minBufferMs = 250,
   })  : bufferSeconds = bufferSeconds,
         protocol = SendspinProtocol(
           playerName: playerName,
@@ -63,7 +69,10 @@ class SendspinPlayer {
           artworkChannels: artworkChannels,
           unpairedAccess: unpairedAccess,
           pskCandidates: pskCandidates,
-          initialStaticDelayMs: initialStaticDelayMs,
+          supportedCommands: supportedCommands,
+          initialOutputDelayMs: initialOutputDelayMs,
+          requiredLeadTimeMs: requiredLeadTimeMs,
+          minBufferMs: minBufferMs,
         ) {
     _wireProtocol();
   }
@@ -133,12 +142,32 @@ class SendspinPlayer {
   SendspinMetadata? get pendingMetadata => protocol.pendingMetadata;
   int? get currentTrackPositionMs => protocol.currentTrackPositionMs;
 
-  int get staticDelayMs => protocol.staticDelayMs;
+  int get outputDelayMs => protocol.outputDelayMs;
 
-  void Function(int delayMs)? get onStaticDelayChanged =>
-      _userOnStaticDelayChanged;
-  set onStaticDelayChanged(void Function(int delayMs)? cb) =>
-      _userOnStaticDelayChanged = cb;
+  /// Sets the output delay locally and reports it to the server.
+  void setOutputDelayMs(int delayMs) {
+    protocol.setOutputDelayMs(delayMs);
+    _buffer?.outputDelayMs = protocol.outputDelayMs;
+  }
+
+  bool get isAvailable => protocol.isAvailable;
+  void setAvailable(bool available) => protocol.setAvailable(available);
+  void sendLeave() => protocol.sendLeave();
+
+  void setTimingParameters({int? requiredLeadTimeMs, int? minBufferMs}) =>
+      protocol.setTimingParameters(
+          requiredLeadTimeMs: requiredLeadTimeMs, minBufferMs: minBufferMs);
+
+  void setSupportedCommands(Set<SendspinPlayerCommand> commands) =>
+      protocol.setSupportedCommands(commands);
+
+  AudioFormat? get preferredFormat => protocol.preferredFormat;
+  set preferredFormat(AudioFormat? format) => protocol.preferredFormat = format;
+
+  void Function(int delayMs)? get onOutputDelayChanged =>
+      _userOnOutputDelayChanged;
+  set onOutputDelayChanged(void Function(int delayMs)? cb) =>
+      _userOnOutputDelayChanged = cb;
 
   // ---------------------------------------------------------------------------
   // Delegated methods
@@ -169,6 +198,7 @@ class SendspinPlayer {
       protocol.handleBinaryMessage(data);
 
   void updateVolume(double volume) => protocol.updateVolume(volume);
+  void updateMuted(bool muted) => protocol.updateMuted(muted);
 
   void startClockSync() => protocol.startClockSync();
   void stopClockSync() => protocol.stopClockSync();
@@ -191,8 +221,6 @@ class SendspinPlayer {
   /// timers.
   void resetForNewConnection() {
     protocol.resetForNewConnection();
-    _underrunPollTimer?.cancel();
-    _underrunPollTimer = null;
     _codec?.dispose();
     _codec = null;
     _buffer?.flush();
@@ -201,8 +229,6 @@ class SendspinPlayer {
 
   /// Cleans up codec and protocol resources.
   void dispose() {
-    _underrunPollTimer?.cancel();
-    _underrunPollTimer = null;
     _codec?.dispose();
     _codec = null;
     _buffer = null;
@@ -218,9 +244,9 @@ class SendspinPlayer {
     protocol.onAudioFrame = _handleAudioFrame;
     protocol.onStreamClear = _handleStreamClear;
     protocol.onStreamEnd = _handleStreamEnd;
-    protocol.onStaticDelayChanged = (delayMs) {
-      _buffer?.staticDelayMs = delayMs;
-      _userOnStaticDelayChanged?.call(delayMs);
+    protocol.onOutputDelayChanged = (delayMs) {
+      _buffer?.outputDelayMs = delayMs;
+      _userOnOutputDelayChanged?.call(delayMs);
     };
   }
 
@@ -262,18 +288,9 @@ class SendspinPlayer {
         maxBufferMs: bufferSeconds * 1000,
       );
     }
-    _buffer!.staticDelayMs = protocol.staticDelayMs;
-
-    _underrunPollTimer ??= Timer.periodic(
-        const Duration(milliseconds: 500), (_) => _checkUnderrun());
+    _buffer!.outputDelayMs = protocol.outputDelayMs;
 
     onStreamStart?.call(config.sampleRate, config.channels, config.bitDepth);
-  }
-
-  void _checkUnderrun() {
-    final buf = _buffer;
-    if (buf == null) return;
-    protocol.setPipelineError(buf.isInUnderrun);
   }
 
   void _handleAudioFrame(AudioFrame frame) {
@@ -298,9 +315,6 @@ class SendspinPlayer {
   }
 
   void _handleStreamEnd() {
-    _underrunPollTimer?.cancel();
-    _underrunPollTimer = null;
-    protocol.setPipelineError(false);
     onStreamStop?.call();
     _buffer?.flush();
     _codec?.dispose();

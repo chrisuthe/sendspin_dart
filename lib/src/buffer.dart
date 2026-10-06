@@ -46,7 +46,7 @@ class SendspinBuffer {
   final SplayTreeSet<_AudioChunk> _chunks = SplayTreeSet();
   int _totalSamples = 0;
   bool _startupMet = false;
-  int _staticDelayMs = 0;
+  int _outputDelayMs = 0;
 
   bool _hasProducedAudio = false;
   bool _inUnderrun = false;
@@ -55,11 +55,11 @@ class SendspinBuffer {
   /// Cleared when a subsequent pull returns real data.
   bool get isInUnderrun => _inUnderrun;
 
-  /// Sets the static delay in milliseconds for multi-room sync.
+  /// Sets the output delay in milliseconds for multi-room sync.
   ///
   /// The delay offsets when samples become eligible for playback, effectively
   /// holding audio in the buffer longer to compensate for speaker distance.
-  set staticDelayMs(int value) => _staticDelayMs = value;
+  set outputDelayMs(int value) => _outputDelayMs = value;
 
   // Sync correction state
   bool _playbackAnchored = false;
@@ -157,8 +157,8 @@ class SendspinBuffer {
     }
 
     // Static delay: hold back enough samples to cover the delay period.
-    if (_staticDelayMs > 0) {
-      final delaySamples = _staticDelayMs * _samplesPerMs;
+    if (_outputDelayMs > 0) {
+      final delaySamples = _outputDelayMs * _samplesPerMs;
       if (_totalSamples <= delaySamples) {
         return Int16List(count);
       }

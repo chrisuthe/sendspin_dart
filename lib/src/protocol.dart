@@ -91,6 +91,17 @@ class DeviceInfo {
       };
 }
 
+/// Commands a server may send to the player role, as advertised in
+/// `supported_commands` of `client/state`.
+enum SendspinPlayerCommand {
+  volume('volume'),
+  mute('mute'),
+  setOutputDelay('set_output_delay');
+
+  final String wireValue;
+  const SendspinPlayerCommand(this.wireValue);
+}
+
 /// Audio format description for supported codec negotiation.
 class AudioFormat {
   final String codec;
@@ -111,6 +122,12 @@ class AudioFormat {
         'sample_rate': sampleRate,
         'bit_depth': bitDepth,
       };
+
+  bool sameAs(AudioFormat other) =>
+      codec == other.codec &&
+      channels == other.channels &&
+      sampleRate == other.sampleRate &&
+      bitDepth == other.bitDepth;
 }
 
 /// Sendspin protocol state machine.
@@ -179,14 +196,23 @@ class SendspinProtocol {
   /// Drops a connection whose server never declares its purpose.
   Timer? _activateTimer;
 
-  int _staticDelayMs = 0;
-  bool _pipelineError = false;
+  int _outputDelayMs = 0;
+  int _requiredLeadTimeMs;
+  int _minBufferMs;
+  Set<SendspinPlayerCommand> _supportedCommands;
+  AudioFormat? _preferredFormat;
+
+  /// False while the consumer reports a non-interruptible external activity.
+  bool _availableToSendspin = true;
+
+  /// The `available` and `min_buffer_ms` values last put on the wire, to
+  /// notice when the time filter or the delay measurement changes them.
+  bool? _reportedAvailable;
+  int? _reportedMinBufferMs;
 
   SendspinPlayerState _state = const SendspinPlayerState();
   final StreamController<SendspinPlayerState> _stateController =
       StreamController<SendspinPlayerState>.broadcast();
-
-  Timer? _stateReportTimer;
 
   /// A metadata state whose timestamp is still in the future. At most one is
   /// held; [_pendingMetadataTimer] applies it when its time is reached.
@@ -243,8 +269,10 @@ class SendspinProtocol {
   /// Called when the server changes volume or mute via server/command.
   void Function(double volume, bool muted)? onVolumeChanged;
 
-  /// Called when the server updates the static delay via server/command.
-  void Function(int delayMs)? onStaticDelayChanged;
+  /// Called when the server sets the output delay via `server/command`.
+  /// The spec requires the delay to survive reboots and reconnects: persist
+  /// it here and pass it back as `initialOutputDelayMs`.
+  void Function(int delayMs)? onOutputDelayChanged;
 
   /// Called when a group/update message arrives with the new group state.
   void Function(SendspinGroupState groupState)? onGroupUpdate;
@@ -271,10 +299,23 @@ class SendspinProtocol {
     required bool unpairedAccess,
     List<SendspinPskCandidate> Function()? pskCandidates,
     this.activateTimeout = const Duration(seconds: 30),
-    int initialStaticDelayMs = 0,
+    Set<SendspinPlayerCommand> supportedCommands = const {
+      SendspinPlayerCommand.volume,
+      SendspinPlayerCommand.mute,
+      SendspinPlayerCommand.setOutputDelay,
+    },
+    int initialOutputDelayMs = 0,
+    int requiredLeadTimeMs = 250,
+    int minBufferMs = 250,
     int Function()? now,
   })  : _now = now,
-        _unpairedAccess = unpairedAccess {
+        _unpairedAccess = unpairedAccess,
+        _supportedCommands = Set.of(supportedCommands),
+        _requiredLeadTimeMs = requiredLeadTimeMs,
+        _minBufferMs = minBufferMs {
+    if (requiredLeadTimeMs < 0 || minBufferMs < 0) {
+      throw ArgumentError('Timing parameters must not be negative');
+    }
     if (roles.contains(SendspinRole.artwork) &&
         (artworkChannels == null || artworkChannels!.isEmpty)) {
       throw ArgumentError(
@@ -283,8 +324,8 @@ class SendspinProtocol {
     if (roles.contains(SendspinRole.artwork) && artworkChannels!.length > 4) {
       throw ArgumentError('artworkChannels may have at most 4 entries');
     }
-    _staticDelayMs = initialStaticDelayMs.clamp(0, 5000);
-    _state = _state.copyWith(staticDelayMs: _staticDelayMs);
+    _outputDelayMs = initialOutputDelayMs.clamp(0, 5000);
+    _state = _state.copyWith(outputDelayMs: _outputDelayMs);
     _timeBurst = SendspinTimeBurst(now: nowUs);
     _wireTimeBurst();
     _channel = SendspinChannel(identity: identity, pskCandidates: pskCandidates)
@@ -321,7 +362,13 @@ class SendspinProtocol {
       // The mapping just moved, so a held scheduled update may now be due
       // (or due later than its timer says).
       _evaluatePendingMetadata();
+      // A player becomes available once the filter is synchronized.
+      _reportStateIfChanged();
     };
+    // Until the filter can translate timestamps the player is unavailable,
+    // so do not wait a full burst interval for the second sample.
+    _timeBurst.nextBurstDelay =
+        () => _clock.isSynchronized ? null : const Duration(milliseconds: 100);
   }
 
   // -------------------------------------------------------------------------
@@ -372,8 +419,35 @@ class SendspinProtocol {
   /// Stream of state changes.
   Stream<SendspinPlayerState> get stateStream => _stateController.stream;
 
-  /// Current static delay in milliseconds (set by server/command).
-  int get staticDelayMs => _staticDelayMs;
+  /// Current output delay in milliseconds (0-5000): extra delay beyond the
+  /// device's audio port, such as an external amplifier.
+  int get outputDelayMs => _outputDelayMs;
+
+  /// Whether the client reports `available: true`: the consumer has not
+  /// declared a non-interruptible external activity, and, when the player
+  /// role is active, the time filter is synchronized.
+  bool get isAvailable =>
+      _availableToSendspin &&
+      (!isRoleActive(SendspinRole.player) || _clock.isSynchronized);
+
+  /// The `min_buffer_ms` reported to the server: the configured minimum, or
+  /// the value measured from chunk arrival delay when that is larger.
+  int get reportedMinBufferMs {
+    final measured = _arrivalDelay.minBufferMs ?? 0;
+    return measured > _minBufferMs ? measured : _minBufferMs;
+  }
+
+  /// The format the player currently prefers, or null for no override. Must
+  /// be one of [supportedFormats]. The server re-derives the stream format
+  /// when this changes.
+  AudioFormat? get preferredFormat => _preferredFormat;
+  set preferredFormat(AudioFormat? format) {
+    if (format != null && !supportedFormats.any((f) => f.sameAs(format))) {
+      throw ArgumentError('preferredFormat must be one of supportedFormats');
+    }
+    _preferredFormat = format;
+    _sendState();
+  }
 
   /// The scheduled metadata update that has not taken effect yet, if any.
   /// The current state is [SendspinPlayerState.metadata].
@@ -461,22 +535,52 @@ class SendspinProtocol {
     });
   }
 
-  /// Builds a client/state report.
+  /// Builds a `client/state` report: `available` plus the full state object
+  /// of every active role that defines one.
   String buildClientState() {
-    final payload = <String, dynamic>{
-      'state': _pipelineError ? 'error' : 'synchronized',
-    };
+    final payload = <String, dynamic>{'available': isAvailable};
 
-    if (roles.contains(SendspinRole.player)) {
+    if (isRoleActive(SendspinRole.player)) {
       payload['player'] = {
         'volume': (_state.volume * 100).round(),
         'muted': _state.muted,
-        'static_delay_ms': _staticDelayMs,
-        'supported_commands': ['set_static_delay'],
+        'output_delay_ms': _outputDelayMs,
+        'required_lead_time_ms': _requiredLeadTimeMs,
+        'min_buffer_ms': reportedMinBufferMs,
+        'supported_commands': [
+          for (final command in SendspinPlayerCommand.values)
+            if (_supportedCommands.contains(command)) command.wireValue,
+        ],
+        if (_preferredFormat != null) 'format': _preferredFormat!.toJson(),
+      };
+    }
+
+    if (isRoleActive(SendspinRole.artwork)) {
+      payload['artwork'] = {
+        'channels': artworkChannels!.map((c) => c.toJson()).toList(),
       };
     }
 
     return jsonEncode({'type': 'client/state', 'payload': payload});
+  }
+
+  /// Sends `client/state` and remembers the derived values it carried.
+  void _sendState() {
+    _reportedAvailable = isAvailable;
+    _reportedMinBufferMs = reportedMinBufferMs;
+    _sendApplication(buildClientState());
+  }
+
+  /// Sends `client/state` when a value the library derives itself
+  /// (`available`, the measured `min_buffer_ms`) differs from what was last
+  /// reported.
+  void _reportStateIfChanged() {
+    if (_reportedAvailable == null) return;
+    if (_reportedAvailable != isAvailable ||
+        (isRoleActive(SendspinRole.player) &&
+            _reportedMinBufferMs != reportedMinBufferMs)) {
+      _sendState();
+    }
   }
 
   /// Builds a client/goodbye message with the given reason.
@@ -522,14 +626,60 @@ class SendspinProtocol {
     _channel.sendJsonText(json);
   }
 
-  /// Sets the pipeline error flag and immediately reports state if changed.
+  /// Reports whether the client will take part in Sendspin playback.
   ///
-  /// Per spec, clients mute output on `state: 'error'` and resume on
-  /// `state: 'synchronized'` once sync is restored.
-  void setPipelineError(bool error) {
-    if (_pipelineError == error) return;
-    _pipelineError = error;
-    _sendApplication(buildClientState());
+  /// Pass false only for a non-interruptible external activity (another
+  /// audio source, an HDMI input, local playback that will not yield). For an
+  /// interruptible activity stay available and, if the group is playing, use
+  /// [sendLeave]. Stream messages are still processed while unavailable.
+  void setAvailable(bool available) {
+    if (_availableToSendspin == available) return;
+    _availableToSendspin = available;
+    _sendState();
+  }
+
+  /// Sends `client/leave`: the client leaves its current group and ends up
+  /// in a stopped solo group, rejoining only through an explicit `switch`.
+  void sendLeave() {
+    _sendApplication(jsonEncode({
+      'type': 'client/leave',
+      'payload': <String, dynamic>{},
+    }));
+  }
+
+  /// Sets the output delay locally (e.g. from a settings screen) and reports
+  /// it. Clamped to 0-5000 ms. [onOutputDelayChanged] is not called; it is
+  /// for changes made by the server.
+  void setOutputDelayMs(int delayMs) {
+    _outputDelayMs = delayMs.clamp(0, 5000);
+    _updateState(_state.copyWith(outputDelayMs: _outputDelayMs));
+    _sendState();
+  }
+
+  /// Updates the timing parameters the server schedules audio by. Both
+  /// depend on the audio backend, so the consumer supplies them:
+  ///
+  /// - [requiredLeadTimeMs]: startup lead from a start trigger to the first
+  ///   chunk that can be played in full (codec init, backend buffering, DAC
+  ///   latency).
+  /// - [minBufferMs]: minimum ongoing buffer. The value reported is this or
+  ///   the measured arrival-delay tail, whichever is larger.
+  ///
+  /// Neither includes the output delay.
+  void setTimingParameters({int? requiredLeadTimeMs, int? minBufferMs}) {
+    if ((requiredLeadTimeMs ?? 0) < 0 || (minBufferMs ?? 0) < 0) {
+      throw ArgumentError('Timing parameters must not be negative');
+    }
+    _requiredLeadTimeMs = requiredLeadTimeMs ?? _requiredLeadTimeMs;
+    _minBufferMs = minBufferMs ?? _minBufferMs;
+    _sendState();
+  }
+
+  /// Changes which commands the server may send, e.g. when the audio output
+  /// changes to one without remote volume.
+  void setSupportedCommands(Set<SendspinPlayerCommand> commands) {
+    _supportedCommands = Set.of(commands);
+    _sendState();
   }
 
   /// Whether the server has activated [role] on this connection.
@@ -592,7 +742,13 @@ class SendspinProtocol {
   /// Update volume from local UI and report to server.
   void updateVolume(double volume) {
     _updateState(_state.copyWith(volume: volume.clamp(0.0, 1.0)));
-    _sendApplication(buildClientState());
+    _sendState();
+  }
+
+  /// Update mute from local UI and report to server. Independent of volume.
+  void updateMuted(bool muted) {
+    _updateState(_state.copyWith(muted: muted));
+    _sendState();
   }
 
   // -------------------------------------------------------------------------
@@ -660,7 +816,6 @@ class SendspinProtocol {
     _activateTimer = null;
     _timeBurst.stop();
     _clockSyncPaused = false;
-    _stopStateReporting();
   }
 
   /// Dispatches a decrypted JSON message by its `type`. Unrecognized types
@@ -797,7 +952,7 @@ class SendspinProtocol {
     // becomes active, and a client with any active role sends an initial
     // client/state.
     if (added.isNotEmpty || (firstActivation && newRoles.isNotEmpty)) {
-      _sendApplication(buildClientState());
+      _sendState();
     }
 
     onActivate?.call(activities, newRoles);
@@ -892,7 +1047,6 @@ class SendspinProtocol {
     ));
 
     _playerStreamActive = true;
-    _startStateReporting();
 
     onStreamConfig?.call(StreamConfig(
       codec: codecName,
@@ -926,7 +1080,6 @@ class SendspinProtocol {
   /// buffered audio that was still finishing is cleared too).
   void _endPlayerStream() {
     _playerStreamActive = false;
-    _stopStateReporting();
 
     _updateState(_state.copyWith(
       connectionState: SendspinConnectionState.syncing,
@@ -939,31 +1092,37 @@ class SendspinProtocol {
     final player = jsonObject(payload['player']);
     if (player == null || !isRoleActive(SendspinRole.player)) return;
 
-    final command = jsonString(player['command']);
+    // Commands absent from the current supported_commands are ignored.
+    final name = player['command'];
+    final command = SendspinPlayerCommand.values
+        .where((c) => c.wireValue == name && _supportedCommands.contains(c))
+        .firstOrNull;
     switch (command) {
-      case 'volume':
+      case SendspinPlayerCommand.volume:
         final vol = player['volume'];
         if (vol is num) {
-          final normalized = vol.toDouble() / 100;
+          final normalized = (vol.toDouble() / 100).clamp(0.0, 1.0);
           _updateState(_state.copyWith(volume: normalized));
-          _sendApplication(buildClientState());
+          _sendState();
           onVolumeChanged?.call(normalized, _state.muted);
         }
-      case 'mute':
-        final muted = jsonBool(player['mute']);
-        if (muted != null) {
+      case SendspinPlayerCommand.mute:
+        final muted = player['mute'];
+        if (muted is bool) {
           _updateState(_state.copyWith(muted: muted));
-          _sendApplication(buildClientState());
+          _sendState();
           onVolumeChanged?.call(_state.volume, muted);
         }
-      case 'set_static_delay':
-        final delayMs = jsonInt(player['static_delay_ms']);
+      case SendspinPlayerCommand.setOutputDelay:
+        final delayMs = jsonInt(player['output_delay_ms']);
         if (delayMs != null) {
-          _staticDelayMs = delayMs.clamp(0, 5000);
-          _updateState(_state.copyWith(staticDelayMs: _staticDelayMs));
-          _sendApplication(buildClientState());
-          onStaticDelayChanged?.call(_staticDelayMs);
+          _outputDelayMs = delayMs.clamp(0, 5000);
+          _updateState(_state.copyWith(outputDelayMs: _outputDelayMs));
+          _sendState();
+          onOutputDelayChanged?.call(_outputDelayMs);
         }
+      case null:
+        break;
     }
   }
 
@@ -1092,6 +1251,7 @@ class SendspinProtocol {
     final delayUs = arrivalUs - transmittedUs;
     _arrivalDelay.addSample(delayUs: delayUs, nowUs: arrivalUs);
     onArrivalDelay?.call(delayUs);
+    _reportStateIfChanged();
   }
 
   /// Parses an audio chunk: byte 0 = message type, bytes 1-8 = BE int64
@@ -1133,22 +1293,6 @@ class SendspinProtocol {
   }
 
   // -------------------------------------------------------------------------
-  // Periodic state reporting
-  // -------------------------------------------------------------------------
-
-  void _startStateReporting() {
-    _stopStateReporting();
-    _stateReportTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      _sendApplication(buildClientState());
-    });
-  }
-
-  void _stopStateReporting() {
-    _stateReportTimer?.cancel();
-    _stateReportTimer = null;
-  }
-
-  // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
 
@@ -1167,8 +1311,9 @@ class SendspinProtocol {
     _clockSyncPaused = false;
     _playerStreamActive = false;
     _held.clear();
+    _reportedAvailable = null;
+    _reportedMinBufferMs = null;
     _timeBurst.reset();
-    _stopStateReporting();
     _clock.reset();
     _arrivalDelay.reset();
     // One clean state, with nothing of the old connection left in it.
@@ -1178,7 +1323,7 @@ class SendspinProtocol {
     _updateState(SendspinPlayerState(
       volume: _state.volume,
       muted: _state.muted,
-      staticDelayMs: _state.staticDelayMs,
+      outputDelayMs: _state.outputDelayMs,
     ));
   }
 

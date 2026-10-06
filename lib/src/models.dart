@@ -188,7 +188,7 @@ class SendspinPlayerState {
   final int bufferDepthMs;
   final int clockOffsetMs;
   final int clockSamples;
-  final int staticDelayMs;
+  final int outputDelayMs;
 
   /// The connected server's `server_id` (its static public key), once the
   /// handshake has completed.
@@ -215,7 +215,7 @@ class SendspinPlayerState {
     this.bufferDepthMs = 0,
     this.clockOffsetMs = 0,
     this.clockSamples = 0,
-    this.staticDelayMs = 0,
+    this.outputDelayMs = 0,
     this.serverId,
     this.activities = const <String>{},
     this.activeRoles = const <String>[],
@@ -240,7 +240,7 @@ class SendspinPlayerState {
     int? bufferDepthMs,
     int? clockOffsetMs,
     int? clockSamples,
-    int? staticDelayMs,
+    int? outputDelayMs,
     String? serverId,
     Set<String>? activities,
     List<String>? activeRoles,
@@ -261,7 +261,7 @@ class SendspinPlayerState {
       bufferDepthMs: bufferDepthMs ?? this.bufferDepthMs,
       clockOffsetMs: clockOffsetMs ?? this.clockOffsetMs,
       clockSamples: clockSamples ?? this.clockSamples,
-      staticDelayMs: staticDelayMs ?? this.staticDelayMs,
+      outputDelayMs: outputDelayMs ?? this.outputDelayMs,
       serverId: serverId ?? this.serverId,
       activities: activities ?? this.activities,
       activeRoles: activeRoles ?? this.activeRoles,
@@ -311,11 +311,15 @@ class ArtworkChannel {
     required this.mediaHeight,
   });
 
+  /// The channel's entry in the `artwork` object of `client/state`. A
+  /// channel whose source is `none` carries no format or size.
   Map<String, dynamic> toJson() => {
         'source': source,
-        'format': format,
-        'media_width': mediaWidth,
-        'media_height': mediaHeight,
+        if (source != 'none') ...{
+          'format': format,
+          'width': mediaWidth,
+          'height': mediaHeight,
+        },
       };
 }
 

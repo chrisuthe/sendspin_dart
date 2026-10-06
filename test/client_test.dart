@@ -197,62 +197,6 @@ void main() {
       client.dispose();
     });
 
-    test('buildClientState always reports synchronized per spec', () {
-      final client = SendspinClient(
-        playerName: 'Test Player',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 5,
-      );
-      final state =
-          jsonDecode(client.buildClientState()) as Map<String, dynamic>;
-      expect(state['payload']['state'], 'synchronized');
-      client.dispose();
-    });
-
-    test('starts state report timer on stream/start and stops on stream/end',
-        () async {
-      final client = SendspinClient(
-        playerName: 'Test Player',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 5,
-      );
-      final sentMessages = <String>[];
-      captureSent(client, sentMessages);
-
-      serverSends(
-          client,
-          jsonEncode({
-            'type': 'server/hello',
-            'payload': {'name': 'MA'},
-          }));
-      sentMessages.clear();
-
-      serverSends(
-          client,
-          jsonEncode({
-            'type': 'stream/start',
-            'payload': {
-              'player': {
-                'codec': 'pcm',
-                'channels': 2,
-                'sample_rate': 48000,
-                'bit_depth': 16,
-              },
-            },
-          }));
-
-      serverSends(
-          client,
-          jsonEncode({
-            'type': 'stream/end',
-            'payload': {},
-          }));
-
-      client.dispose();
-    });
-
     test('parseBinaryFrame extracts timestamp and data', () {
       final frame = Uint8List(17);
       final view = ByteData.view(frame.buffer);
