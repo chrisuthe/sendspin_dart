@@ -4,12 +4,14 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'test_identity.dart';
+
 void main() {
   group('SendspinClient', () {
     test('starts in disabled state', () {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       expect(client.state.connectionState, SendspinConnectionState.disabled);
@@ -19,7 +21,7 @@ void main() {
     test('parses server/hello and transitions to syncing', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final states = <SendspinConnectionState>[];
@@ -43,7 +45,7 @@ void main() {
     test('parses stream/start and configures codec', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       client.handleTextMessage(jsonEncode({
@@ -75,7 +77,7 @@ void main() {
     test('parses server/command for volume', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       client.handleTextMessage(jsonEncode({
@@ -92,7 +94,7 @@ void main() {
     test('parses server/command for mute', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       client.handleTextMessage(jsonEncode({
@@ -109,7 +111,7 @@ void main() {
     test('builds correct client/hello message with custom device info', () {
       final client = SendspinClient(
         playerName: 'Kitchen Display',
-        clientId: 'abc-123',
+        identity: testIdentity,
         bufferSeconds: 5,
         deviceInfo: const DeviceInfo(
           productName: 'MyApp',
@@ -121,7 +123,7 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], 'abc-123');
+      expect(payload['client_id'], testIdentity.clientId);
       expect(payload['name'], 'Kitchen Display');
       expect(payload['version'], 1);
       expect(payload['supported_roles'], contains('player@v1'));
@@ -135,7 +137,7 @@ void main() {
     test('sends client/state immediately on volume command', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];
@@ -160,7 +162,7 @@ void main() {
     test('sends client/state immediately on mute command', () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];
@@ -185,7 +187,7 @@ void main() {
     test('buildClientState always reports synchronized per spec', () {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final state =
@@ -198,7 +200,7 @@ void main() {
         () async {
       final client = SendspinClient(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];

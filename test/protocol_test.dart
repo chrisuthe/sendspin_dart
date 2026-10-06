@@ -8,6 +8,8 @@ import 'package:sendspin_dart/src/protocol.dart';
 import 'package:sendspin_dart/src/models.dart';
 import 'package:sendspin_dart/src/clock.dart';
 
+import 'test_identity.dart';
+
 void main() {
   group('SendspinProtocol', () {
     late SendspinProtocol protocol;
@@ -15,7 +17,7 @@ void main() {
     setUp(() {
       protocol = SendspinProtocol(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
     });
@@ -113,7 +115,7 @@ void main() {
     test('builds correct client/hello message', () {
       final protocol = SendspinProtocol(
         playerName: 'Kitchen Display',
-        clientId: 'abc-123',
+        identity: testIdentity,
         bufferSeconds: 5,
         deviceInfo: const DeviceInfo(
           productName: 'MyApp',
@@ -125,7 +127,7 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], 'abc-123');
+      expect(payload['client_id'], testIdentity.clientId);
       expect(payload['name'], 'Kitchen Display');
       expect(payload['version'], 1);
       expect(payload['supported_roles'], contains('player@v1'));
@@ -147,7 +149,7 @@ void main() {
         // that advertise set_static_delay here, so this is enforced.
         final protocol = SendspinProtocol(
           playerName: 'Test',
-          clientId: 'test-id',
+          identity: testIdentity,
           bufferSeconds: 5,
         );
         final parsed =
@@ -503,7 +505,7 @@ void main() {
     test('initialStaticDelayMs sets staticDelayMs at construction', () {
       final p = SendspinProtocol(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: 1500,
       );
@@ -514,7 +516,7 @@ void main() {
     test('initialStaticDelayMs is reflected in buildClientState', () {
       final p = SendspinProtocol(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: 1500,
       );
@@ -529,7 +531,7 @@ void main() {
     test('initialStaticDelayMs above max is clamped to 5000', () {
       final p = SendspinProtocol(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: 99999,
       );
@@ -540,7 +542,7 @@ void main() {
     test('negative initialStaticDelayMs is clamped to 0', () {
       final p = SendspinProtocol(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: -50,
       );
@@ -784,7 +786,7 @@ void main() {
     test('buildClientHello buffer_capacity uses 48k stereo 16-bit default', () {
       final p = SendspinProtocol(
         playerName: 'p',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
@@ -798,7 +800,7 @@ void main() {
         () {
       final p = SendspinProtocol(
         playerName: 'p',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         supportedFormats: const [
           AudioFormat(
@@ -816,7 +818,7 @@ void main() {
         () {
       final p = SendspinProtocol(
         playerName: 'p',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 2,
         supportedFormats: const [
           AudioFormat(
@@ -902,7 +904,7 @@ void main() {
     test('default roles produces player@v1 only (backward compat)', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
@@ -918,7 +920,7 @@ void main() {
     test('controller-only role omits player@v1_support', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -932,7 +934,7 @@ void main() {
     test('metadata-only role has no support block', () {
       final p = SendspinProtocol(
         playerName: 'Display',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.metadata},
       );
@@ -947,7 +949,7 @@ void main() {
     test('artwork role includes artwork@v1_support with channels', () {
       final p = SendspinProtocol(
         playerName: 'Display',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -976,7 +978,7 @@ void main() {
     test('multi-role advertises all roles and correct support blocks', () {
       final p = SendspinProtocol(
         playerName: 'Full Client',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         roles: const {
           SendspinRole.player,
@@ -1021,7 +1023,7 @@ void main() {
       expect(
         () => SendspinProtocol(
           playerName: 'P',
-          clientId: 'c',
+          identity: testIdentity,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
         ),
@@ -1033,7 +1035,7 @@ void main() {
       expect(
         () => SendspinProtocol(
           playerName: 'P',
-          clientId: 'c',
+          identity: testIdentity,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
           artworkChannels: const [],
@@ -1046,7 +1048,7 @@ void main() {
       expect(
         () => SendspinProtocol(
           playerName: 'P',
-          clientId: 'c',
+          identity: testIdentity,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
           artworkChannels: const [
@@ -1085,7 +1087,8 @@ void main() {
   group('server/state metadata', () {
     late SendspinProtocol p;
     setUp(() {
-      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+      p = SendspinProtocol(
+          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
     });
     tearDown(() => p.dispose());
 
@@ -1207,7 +1210,7 @@ void main() {
         final skew = _Skew();
         final p = SendspinProtocol(
           playerName: 'T',
-          clientId: 'c',
+          identity: testIdentity,
           bufferSeconds: 2,
           now: () => startUs + async.elapsed.inMicroseconds + skew.us,
         );
@@ -1465,7 +1468,8 @@ void main() {
   group('server/state controller', () {
     late SendspinProtocol p;
     setUp(() {
-      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+      p = SendspinProtocol(
+          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
     });
     tearDown(() => p.dispose());
 
@@ -1524,7 +1528,8 @@ void main() {
   group('server/state combined', () {
     late SendspinProtocol p;
     setUp(() {
-      p = SendspinProtocol(playerName: 'T', clientId: 'c', bufferSeconds: 2);
+      p = SendspinProtocol(
+          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
     });
     tearDown(() => p.dispose());
 
@@ -1578,7 +1583,7 @@ void main() {
         () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1601,7 +1606,7 @@ void main() {
     test('sendControllerVolume sends volume command with volume param', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1622,7 +1627,7 @@ void main() {
     test('sendControllerMute sends mute command with mute param', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1643,7 +1648,7 @@ void main() {
     test('sendControllerCommand throws StateError without controller role', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         roles: const {SendspinRole.player},
       );
@@ -1654,7 +1659,7 @@ void main() {
     test('sendControllerVolume throws StateError without controller role', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       expect(() => p.sendControllerVolume(50), throwsStateError);
@@ -1664,7 +1669,7 @@ void main() {
     test('sendControllerMute throws StateError without controller role', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       expect(() => p.sendControllerMute(true), throwsStateError);
@@ -1674,7 +1679,7 @@ void main() {
     test('all spec commands can be sent', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1711,7 +1716,7 @@ void main() {
     test('sendControllerVolume throws RangeError for out-of-range values', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1729,7 +1734,7 @@ void main() {
     test('controller-only client omits player block from client/state', () {
       final p = SendspinProtocol(
         playerName: 'Remote',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1743,7 +1748,7 @@ void main() {
     test('player role includes player block in client/state', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
@@ -1767,7 +1772,7 @@ void main() {
     test('artwork role receives artwork frames via onArtworkFrame', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -1793,7 +1798,7 @@ void main() {
     test('artwork frame type 11 maps to channel 3', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -1832,7 +1837,7 @@ void main() {
     test('artwork frames are dropped when artwork role is not active', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         roles: const {SendspinRole.player},
       );
@@ -1848,7 +1853,7 @@ void main() {
     test('player frames still work alongside artwork role', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         roles: const {SendspinRole.player, SendspinRole.artwork},
         artworkChannels: const [
@@ -1879,7 +1884,7 @@ void main() {
     test('player frames dropped when player role not active', () {
       final p = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );

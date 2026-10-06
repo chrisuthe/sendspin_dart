@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'test_identity.dart';
+
 void main() {
   group('ArrivalDelayTracker', () {
     const windowUs = 10 * 1000 * 1000;
@@ -125,7 +127,7 @@ void main() {
       now = 0;
       protocol = SendspinProtocol(
         playerName: 'P',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         now: () => now,
       );

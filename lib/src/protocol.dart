@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'arrival_delay.dart';
+import 'identity.dart';
 import 'models.dart';
 import 'clock.dart';
 import 'time_burst.dart';
@@ -100,7 +101,10 @@ class AudioFormat {
 /// pullSamples() — those concerns belong to the player layer.
 class SendspinProtocol {
   final String playerName;
-  final String clientId;
+
+  /// The client's static Curve25519 identity. Its public key is the
+  /// `client_id`.
+  final SendspinIdentity identity;
   final int bufferSeconds;
   final DeviceInfo deviceInfo;
   final List<AudioFormat> supportedFormats;
@@ -184,7 +188,7 @@ class SendspinProtocol {
 
   SendspinProtocol({
     required this.playerName,
-    required this.clientId,
+    required this.identity,
     required this.bufferSeconds,
     this.deviceInfo = const DeviceInfo(),
     this.supportedFormats = const [
@@ -235,6 +239,10 @@ class SendspinProtocol {
   // -------------------------------------------------------------------------
   // Public getters
   // -------------------------------------------------------------------------
+
+  /// The `client_id` sent to servers: the identity's public key as unpadded
+  /// base64url.
+  String get clientId => identity.clientId;
 
   /// The clock filter, exposed for consumers that need time conversion.
   SendspinClock get clock => _clock;
@@ -294,7 +302,7 @@ class SendspinProtocol {
   /// Builds the client/hello handshake message per the Sendspin spec.
   String buildClientHello() {
     final payload = <String, dynamic>{
-      'client_id': clientId,
+      'client_id': identity.clientId,
       'name': playerName,
       'version': 1,
       'supported_roles': roles.map((r) => r.wireValue).toList(),
