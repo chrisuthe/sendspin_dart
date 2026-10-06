@@ -226,6 +226,9 @@ class SendspinProtocol {
         clockOffsetMs: (_clock.precisionUs / 1000).round(),
         clockSamples: _clock.sampleCount,
       ));
+      // The mapping just moved, so a held scheduled update may now be due
+      // (or due later than its timer says).
+      _evaluatePendingMetadata();
     };
   }
 
@@ -612,8 +615,13 @@ class SendspinProtocol {
     // Each role object carries that role's full state; an omitted object
     // leaves the role's state, and any pending scheduled update, unchanged.
     final metadataJson = payload['metadata'] as Map<String, dynamic>?;
-    if (metadataJson != null) {
-      _receiveMetadata(SendspinMetadata.fromJson(metadataJson));
+    // `timestamp` is required; without it the state cannot be placed in time
+    // or have its progress extrapolated, so the object is ignored.
+    if (metadataJson != null && metadataJson['timestamp'] is num) {
+      // Either way a held pending update is gone: a future-timestamped state
+      // replaces it, a past or present one discards it.
+      _pendingMetadata = SendspinMetadata.fromJson(metadataJson);
+      _evaluatePendingMetadata();
     }
 
     final controller =
@@ -624,40 +632,26 @@ class SendspinProtocol {
     }
   }
 
-  /// Microseconds until [metadata] takes effect on the local clock, using the
-  /// time filter's current best estimate. Zero or negative means now.
-  int _usUntilEffective(SendspinMetadata metadata) =>
-      _clock.computeClientTime(metadata.timestamp) - nowUs();
-
-  void _receiveMetadata(SendspinMetadata metadata) {
-    // Either way the held pending update is gone: a future-timestamped state
-    // replaces it, a past or present one discards it.
+  /// Applies [_pendingMetadata] if its timestamp, translated to the local
+  /// clock with the time filter's current best estimate, has been reached;
+  /// otherwise (re)arms the timer for the remainder. Runs when a state is
+  /// received, when the timer fires, and whenever the filter is updated.
+  void _evaluatePendingMetadata() {
     _pendingMetadataTimer?.cancel();
     _pendingMetadataTimer = null;
-    _pendingMetadata = null;
-
-    final waitUs = _usUntilEffective(metadata);
-    if (waitUs <= 0) {
-      _applyMetadata(metadata);
-      return;
-    }
-    _pendingMetadata = metadata;
-    _pendingMetadataTimer =
-        Timer(Duration(microseconds: waitUs), _onPendingMetadataDue);
-  }
-
-  void _onPendingMetadataDue() {
     final pending = _pendingMetadata;
     if (pending == null) return;
-    // The filter may have moved since the timer was armed; wait out any
-    // remainder rather than showing the update early.
-    final waitUs = _usUntilEffective(pending);
+
+    // With no samples the filter is the identity mapping and cannot place a
+    // server timestamp at all, so there is nothing to wait for.
+    final waitUs = _clock.sampleCount == 0
+        ? 0
+        : _clock.computeClientTime(pending.timestamp) - nowUs();
     if (waitUs > 0) {
       _pendingMetadataTimer =
-          Timer(Duration(microseconds: waitUs), _onPendingMetadataDue);
+          Timer(Duration(microseconds: waitUs), _evaluatePendingMetadata);
       return;
     }
-    _pendingMetadataTimer = null;
     _pendingMetadata = null;
     _applyMetadata(pending);
   }
@@ -812,6 +806,8 @@ class SendspinProtocol {
     stopClockSync();
     _stopStateReporting();
     _pendingMetadataTimer?.cancel();
+    _pendingMetadataTimer = null;
+    _pendingMetadata = null;
     _stateController.close();
   }
 }
