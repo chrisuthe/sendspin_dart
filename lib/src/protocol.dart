@@ -1076,7 +1076,7 @@ class SendspinProtocol {
   void _startStateReporting() {
     _stopStateReporting();
     _stateReportTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      onSendText?.call(buildClientState());
+      _sendApplication(buildClientState());
     });
   }
 
