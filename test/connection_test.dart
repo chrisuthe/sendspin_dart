@@ -200,6 +200,13 @@ void main() {
       server = connect(protocol, activate: false);
     });
 
+    test('startClockSync before activation does not stall the first burst', () {
+      protocol.startClockSync();
+      expect(server.receivedJson, isEmpty);
+      activate(server, protocol);
+      expect(sentOfType(protocol, 'client/time'), hasLength(1));
+    });
+
     test('no client/state or client/time is sent', () {
       protocol.updateVolume(0.4);
       protocol.setPipelineError(true);
@@ -475,15 +482,150 @@ void main() {
     });
 
     test('nothing more is sent after the goodbye', () {
-      final protocol = _protocol(unpairedAccess: false);
-      final server = connect(protocol, activate: false);
-      activate(server, protocol);
+      // An activated session, so the activation gate is not what stops it.
+      final protocol = _protocol();
+      final server = connect(protocol);
+      protocol.unpairedAccess = false;
+      expect(sentOfType(protocol, 'client/goodbye'), hasLength(1));
       server.receivedJson.clear();
 
       protocol.updateVolume(0.2);
       protocol.sendGoodbye(SendspinGoodbyeReason.shutdown);
       server.sendJson('server/activate', {'activities': <String>[]});
       expect(server.receivedJson, isEmpty);
+    });
+
+    test('a pair/abort rejection cancels the activation timeout', () {
+      fakeAsync((async) {
+        final p = _protocol();
+        final closes = <String>[];
+        p.onClose = closes.add;
+        final s = connect(p, activate: false);
+        s.sendJson('server/activate', {
+          'activities': ['pairing'],
+          'active_roles': <String>[],
+          'pairing': {'method': 'pairing_psk'},
+        });
+        async.elapse(const Duration(minutes: 2));
+        expect(closes, isEmpty,
+            reason: 'pair/abort leaves the connection open');
+        p.dispose();
+      });
+    });
+  });
+
+  group('closing', () {
+    test('a library-initiated close ends the stream and clears the session',
+        () {
+      final protocol = _protocol();
+      var ended = 0;
+      protocol.onStreamEnd = () => ended++;
+      final server = connect(protocol);
+      server.sendJsonText(_streamStart());
+      server.sendJson('server/state', {
+        'metadata': {'timestamp': 0, 'title': 'Now'},
+      });
+
+      protocol.unpairedAccess = false;
+      expect(ended, 1);
+      expect(protocol.state.activeRoles, isEmpty);
+      expect(protocol.state.activities, isEmpty);
+      expect(protocol.state.metadata, isNull);
+      expect(
+          protocol.state.connectionState, SendspinConnectionState.disconnected);
+    });
+
+    test('a transport failure ends the stream too', () {
+      final protocol = _protocol();
+      var ended = 0;
+      protocol.onStreamEnd = () => ended++;
+      final server = connect(protocol);
+      server.sendJsonText(_streamStart());
+      protocol.handleBinaryMessage(Uint8List(64));
+      expect(ended, 1);
+    });
+
+    test('calls after dispose do not throw', () {
+      final protocol = _protocol();
+      connect(protocol);
+      protocol.dispose();
+      protocol.updateVolume(0.5);
+      protocol.resetForNewConnection();
+      protocol.dispose();
+    });
+  });
+
+  group('malformed payloads', () {
+    test('wrongly typed fields are ignored, not thrown', () {
+      final protocol = _protocol();
+      final closes = <String>[];
+      protocol.onClose = closes.add;
+      final server = connect(protocol);
+
+      for (final message in <String, Map<String, dynamic>>{
+        'server/activate': {'activities': 'playback', 'pairing': 'x'},
+        'server/command': {'player': <dynamic>[]},
+        'stream/start': {'player': 'pcm'},
+        'server/time': {
+          'client_transmitted': 'a',
+          'server_received': 1.5,
+          'server_transmitted': <dynamic>[],
+        },
+        'group/update': {'group_id': 7, 'group_name': <dynamic>[]},
+        'server/state': {'metadata': <dynamic>[], 'controller': 'x'},
+        'stream/end': {'roles': 'player'},
+      }.entries) {
+        server.sendJson(message.key, message.value);
+      }
+      server.sendJson('server/command', {
+        'player': {'command': 5, 'volume': 'loud', 'mute': 'yes'},
+      });
+      server.sendJson('stream/start', {
+        'player': {
+          'codec': 9,
+          'sample_rate': '48000',
+          'channels': null,
+          'bit_depth': <dynamic>[],
+          'codec_header': 3,
+        },
+      });
+      server.sendJson('server/state', {
+        'metadata': {
+          'timestamp': 0,
+          'title': 5,
+          'year': 'x',
+          'progress': 'none',
+        },
+        'controller': {
+          'supported_commands': <String, dynamic>{},
+          'volume': 'x'
+        },
+      });
+      server.sendJsonText('{"type":"server/state","payload":'
+          '{"metadata":{"timestamp":1e999}}}');
+      expect(closes, isEmpty);
+    });
+
+    test('whole-number floats are accepted where integers are expected', () {
+      final protocol = _protocol();
+      StreamConfig? config;
+      protocol.onStreamConfig = (c) => config = c;
+      final server = connect(protocol);
+      server.sendJsonText('{"type":"stream/start","payload":{"player":'
+          '{"codec":"pcm","sample_rate":44100.0,"channels":2.0,'
+          '"bit_depth":24.0}}}');
+      expect(config!.sampleRate, 44100);
+      expect(config!.bitDepth, 24);
+    });
+
+    test('a server/activate with a malformed pairing object is refused', () {
+      final protocol = _protocol();
+      final server = connect(protocol, activate: false);
+      server.sendJson('server/activate', {
+        'activities': ['pairing'],
+        'pairing': {'method': 7, 'format': <dynamic>[]},
+      });
+      expect(server.receivedJson.single['type'], 'pair/abort');
     });
   });
 
@@ -597,7 +739,7 @@ void main() {
             pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
         final s = connect(p);
         s.startRehandshake(_pairingPsk, 'pr');
-        async.elapse(const Duration(seconds: 30));
+        async.elapse(const Duration(seconds: 20));
         expect(sentOfType(p, 'client/time'), isEmpty);
 
         s.sendJson('server/activate', {
@@ -606,6 +748,82 @@ void main() {
         expect(sentOfType(p, 'client/time'), hasLength(1));
         p.dispose();
       });
+    });
+
+    test('a pair/abort rejection still ends the re-handshake window', () {
+      server.startRehandshake(_pairingPsk, 'pr');
+      protocol.updateVolume(0.3);
+      // Admissible activities, but a method this client does not offer.
+      server.sendJson('server/activate', {
+        'activities': ['pairing'],
+        'pairing': {'method': 'static_pairing_code'},
+      });
+      expect(sentOfType(protocol, 'pair/abort'), hasLength(1));
+      expect(sentOfType(protocol, 'client/state'), hasLength(1),
+          reason: 'held messages are released');
+
+      protocol.updateVolume(0.4);
+      expect(sentOfType(protocol, 'client/state'), hasLength(2),
+          reason: 'and new ones are no longer held');
+    });
+
+    test('a re-handshake that is never followed by an activation is dropped',
+        () {
+      fakeAsync((async) {
+        final p = _protocol(
+            pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+        final closes = <String>[];
+        p.onClose = closes.add;
+        final s = connect(p);
+        s.startRehandshake(_pairingPsk, 'pr');
+        async.elapse(const Duration(seconds: 29));
+        expect(closes, isEmpty);
+        async.elapse(const Duration(seconds: 2));
+        expect(closes, hasLength(1));
+        p.dispose();
+      });
+    });
+
+    test('startClockSync during the window does not queue a client/time', () {
+      server.startRehandshake(_pairingPsk, 'pr');
+      protocol.startClockSync();
+      server.receivedJson.clear();
+      server.sendJson('server/activate', {
+        'activities': ['playback']
+      });
+      // Exactly the one fresh client/time from the resumed burst.
+      expect(sentOfType(protocol, 'client/time'), hasLength(1));
+    });
+
+    test('persisted roles are dropped when the session stops being capable',
+        () {
+      // Paired, then re-handshaken to the Sentinel PSK with unpaired access
+      // off: the connection is no longer playback-capable.
+      final (p, fake) = _paired();
+      var ended = 0;
+      p.onStreamEnd = () => ended++;
+      final closes = <String>[];
+      p.onClose = closes.add;
+      final s = connect(p, server: fake);
+      s.sendJsonText(_streamStart());
+      expect(p.state.activeRoles, isNotEmpty);
+
+      s.startRehandshake(sentinelPsk, 'sn');
+      s.sendJson('server/activate', {'activities': <String>[]});
+      expect(p.state.activeRoles, isEmpty);
+      expect(ended, 1);
+      expect(closes, isEmpty);
+    });
+
+    test('a re-handshake before the first activation is handled', () {
+      final p = _protocol(
+          pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+      final s = connect(p, activate: false);
+      s.startRehandshake(_pairingPsk, 'pr');
+      expect(s.receivedJson, isEmpty);
+      activate(s, p);
+      expect(p.state.activeRoles, isNotEmpty);
+      expect(sentOfType(p, 'client/state'), hasLength(1));
     });
 
     test('the activation is judged against the newly matched PSK', () {

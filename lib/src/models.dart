@@ -1,6 +1,8 @@
 // ABOUTME: Data models for the Sendspin streaming-audio protocol.
 import 'dart:typed_data';
 
+import 'json_util.dart';
+
 /// Client roles defined by the Sendspin protocol.
 enum SendspinRole {
   player('player@v1'),
@@ -125,26 +127,26 @@ class SendspinMetadata {
   /// Parses the `metadata` object of a server/state message.
   factory SendspinMetadata.fromJson(Map<String, dynamic> json) {
     return SendspinMetadata(
-      timestamp: (json['timestamp'] as num?)?.toInt() ?? 0,
-      title: json['title'] as String?,
-      artist: json['artist'] as String?,
-      albumArtist: json['album_artist'] as String?,
-      album: json['album'] as String?,
-      artworkUrl: json['artwork_url'] as String?,
-      year: (json['year'] as num?)?.toInt(),
-      track: (json['track'] as num?)?.toInt(),
-      progress: _parseProgress(json['progress'] as Map<String, dynamic>?),
-      repeat: SendspinRepeatMode.fromWire(json['repeat'] as String?),
-      shuffle: json['shuffle'] as bool?,
+      timestamp: jsonInt(json['timestamp']) ?? 0,
+      title: jsonString(json['title']),
+      artist: jsonString(json['artist']),
+      albumArtist: jsonString(json['album_artist']),
+      album: jsonString(json['album']),
+      artworkUrl: jsonString(json['artwork_url']),
+      year: jsonInt(json['year']),
+      track: jsonInt(json['track']),
+      progress: _parseProgress(jsonObject(json['progress'])),
+      repeat: SendspinRepeatMode.fromWire(jsonString(json['repeat'])),
+      shuffle: jsonBool(json['shuffle']),
     );
   }
 
   static SendspinMetadataProgress? _parseProgress(Map<String, dynamic>? json) {
     if (json == null) return null;
     return SendspinMetadataProgress(
-      trackProgress: (json['track_progress'] as num?)?.toInt() ?? 0,
-      trackDuration: (json['track_duration'] as num?)?.toInt() ?? 0,
-      playbackSpeed: (json['playback_speed'] as num?)?.toInt() ?? 1000,
+      trackProgress: jsonInt(json['track_progress']) ?? 0,
+      trackDuration: jsonInt(json['track_duration']) ?? 0,
+      playbackSpeed: jsonInt(json['playback_speed']) ?? 1000,
     );
   }
 }

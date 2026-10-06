@@ -46,14 +46,26 @@ bool isPlaybackCapable(SendspinPskCategory matched, bool unpairedAccess,
         Set<String> activities) =>
     _isAllowedSet(matched, unpairedAccess, {...activities, activityPlayback});
 
-bool _isAdmissible({
+/// Whether a declared pairing activity names a method and format the
+/// matched PSK allows and the client currently offers.
+bool _isPairingOffered({
   required SendspinPskCategory matched,
-  required bool unpairedAccess,
   required Set<String> activities,
-  required bool hasRoles,
-}) =>
-    _isAllowedSet(matched, unpairedAccess, activities) &&
-    (!hasRoles || isPlaybackCapable(matched, unpairedAccess, activities));
+  required String? pairingMethod,
+  required String? pairingFormat,
+  required Map<String, Set<String>> offeredPairMethods,
+}) {
+  if (!activities.contains(activityPairing)) return true;
+  final formats = offeredPairMethods[pairingMethod];
+  if (pairingMethod == null || formats == null) return false;
+  // `pairing_psk` is the method if and only if the pairing PSK matched.
+  if ((pairingMethod == 'pairing_psk') !=
+      (matched == SendspinPskCategory.pairing)) {
+    return false;
+  }
+  return pairingMethod != 'dynamic_pairing_code' ||
+      formats.contains(pairingFormat);
+}
 
 /// Decides how to respond to a `server/activate`, selecting the response by
 /// the first rule of the spec that applies.
@@ -71,39 +83,31 @@ ActivationVerdict evaluateActivation({
   required Map<String, Set<String>> offeredPairMethods,
 }) {
   final hasRoles = activeRoles != null && activeRoles.isNotEmpty;
-  final allowed = _isAdmissible(
+  // The activity set and the roles, which is what unpaired access can change.
+  bool activitiesAllowed(bool unpaired) =>
+      _isAllowedSet(matched, unpaired, activities) &&
+      (!hasRoles || isPlaybackCapable(matched, unpaired, activities));
+  final pairingOffered = _isPairingOffered(
     matched: matched,
-    unpairedAccess: unpairedAccess,
     activities: activities,
-    hasRoles: hasRoles,
+    pairingMethod: pairingMethod,
+    pairingFormat: pairingFormat,
+    offeredPairMethods: offeredPairMethods,
   );
 
-  if (!allowed) {
-    final unpaired = matched != SendspinPskCategory.longTerm;
-    if (unpaired &&
-        !unpairedAccess &&
-        _isAdmissible(
-          matched: matched,
-          unpairedAccess: true,
-          activities: activities,
-          hasRoles: hasRoles,
-        )) {
-      return ActivationVerdict.pairingRequired;
-    }
-    return ActivationVerdict.unauthorized;
+  if (activitiesAllowed(unpairedAccess)) {
+    return pairingOffered
+        ? ActivationVerdict.admissible
+        : ActivationVerdict.methodNotSupported;
   }
-
-  if (activities.contains(activityPairing)) {
-    // `pairing_psk` is the method if and only if the pairing PSK matched.
-    final wantsPsk = pairingMethod == 'pairing_psk';
-    final formats = offeredPairMethods[pairingMethod];
-    if (pairingMethod == null ||
-        formats == null ||
-        wantsPsk != (matched == SendspinPskCategory.pairing) ||
-        (pairingMethod == 'dynamic_pairing_code' &&
-            !formats.contains(pairingFormat))) {
-      return ActivationVerdict.methodNotSupported;
-    }
+  // Rule 1 only applies when enabling unpaired access would make the whole
+  // activation admissible, the pairing parameters included.
+  final unpairedSession = matched != SendspinPskCategory.longTerm;
+  if (unpairedSession &&
+      !unpairedAccess &&
+      activitiesAllowed(true) &&
+      pairingOffered) {
+    return ActivationVerdict.pairingRequired;
   }
-  return ActivationVerdict.admissible;
+  return ActivationVerdict.unauthorized;
 }
