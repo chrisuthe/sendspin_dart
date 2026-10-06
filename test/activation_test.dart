@@ -170,6 +170,12 @@ void main() {
           ActivationVerdict.methodNotSupported);
     });
 
+    test('a format is only valid with the dynamic code method', () {
+      expect(
+          _verdict(_pr, ['pairing'], method: 'pairing_psk', format: 'digits'),
+          ActivationVerdict.methodNotSupported);
+    });
+
     test('the pairing object is ignored when pairing is not an activity', () {
       expect(_verdict(_lt, ['playback'], method: 'made_up'),
           ActivationVerdict.admissible);

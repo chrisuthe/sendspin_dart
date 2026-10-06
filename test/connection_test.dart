@@ -316,6 +316,29 @@ void main() {
       expect(sentOfType(protocol, 'client/state'), hasLength(1));
     });
 
+    test('an activation without a valid activities list is ignored', () {
+      final protocol = _protocol();
+      final server = connect(protocol, activate: false);
+      for (final bad in <Map<String, dynamic>>[
+        {},
+        {'activities': 'playback'},
+        {
+          'activities': ['playback', 7]
+        },
+        {
+          'activities': ['playback', 'playback']
+        },
+      ]) {
+        server.sendJson('server/activate', bad);
+      }
+      protocol.updateVolume(0.3);
+      expect(server.receivedJson, isEmpty,
+          reason: 'still provisional, so still gated');
+
+      activate(server, protocol);
+      expect(protocol.state.activities, {'playback'});
+    });
+
     test('a first activation that omits active_roles carries none', () {
       final protocol = _protocol();
       final server = connect(protocol, activate: false);
@@ -826,6 +849,50 @@ void main() {
       expect(sentOfType(p, 'client/state'), hasLength(1));
     });
 
+    test('application messages from the server are ignored during it', () {
+      var updates = 0;
+      var frames = 0;
+      protocol.onGroupUpdate = (_) => updates++;
+      protocol.onAudioFrame = (_) => frames++;
+      server.sendJsonText(_streamStart());
+      server.startRehandshake(_pairingPsk, 'pr');
+      // Not allowed before the new server/activate; must not be acted on
+      // under authorization carried over from the previous keys.
+      server.sendJson('group/update', {
+        'playback_state': 'playing',
+        'group_id': 'g',
+        'group_name': 'G',
+      });
+      server.sendMessage(_audioChunk());
+      expect(updates, 0);
+      expect(frames, 0);
+
+      server.sendJson('server/activate', {
+        'activities': ['playback']
+      });
+      server.sendMessage(_audioChunk());
+      expect(frames, 1);
+    });
+
+    test('a held command is dropped if its role is removed meanwhile', () {
+      server.startRehandshake(_pairingPsk, 'pr');
+      protocol.sendControllerCommand('next');
+      server.sendJson('server/activate', {
+        'activities': ['playback'],
+        'active_roles': ['player@v1'],
+      });
+      expect(sentOfType(protocol, 'client/command'), isEmpty);
+    });
+
+    test('a held command is sent if its role stays active', () {
+      server.startRehandshake(_pairingPsk, 'pr');
+      protocol.sendControllerCommand('next');
+      server.sendJson('server/activate', {
+        'activities': ['playback']
+      });
+      expect(sentOfType(protocol, 'client/command'), hasLength(1));
+    });
+
     test('the activation is judged against the newly matched PSK', () {
       // After re-handshaking to the pairing PSK, pairing_psk is admissible.
       server.startRehandshake(_pairingPsk, 'pr');
@@ -919,6 +986,26 @@ void main() {
           reason: 'the new connection is gated until its own activation');
       activate(server, protocol);
       expect(protocol.state.activeRoles, isNotEmpty);
+    });
+
+    test('publishes no intermediate state that mixes old and new', () async {
+      final protocol = _protocol();
+      final server = connect(protocol);
+      server.sendJson('server/state', {
+        'metadata': {'timestamp': 0, 'title': 'Now'},
+      });
+      final events = <SendspinPlayerState>[];
+      final sub = protocol.stateStream.listen(events.add);
+      protocol.resetForNewConnection();
+      await Future<void>.delayed(Duration.zero);
+      await sub.cancel();
+
+      expect(events, isNotEmpty);
+      for (final state in events) {
+        expect(state.serverId, isNull);
+        expect(state.activeRoles, isEmpty);
+        expect(state.metadata, isNull);
+      }
     });
 
     test('keeps the local volume and mute settings', () {

@@ -172,7 +172,7 @@ class SendspinProtocol {
   /// Between a re-handshake starting and the `server/activate` that follows
   /// it, no new application message may be sent; they wait in [_held].
   bool _rehandshaking = false;
-  final List<String> _held = [];
+  final List<(String, SendspinRole?)> _held = [];
   bool _clockSyncPaused = false;
   bool _playerStreamActive = false;
 
@@ -509,10 +509,14 @@ class SendspinProtocol {
   /// Sends an application message, subject to the sequencing rules: nothing
   /// before the first `server/activate`, and nothing new between a
   /// re-handshake and the activation that follows it.
-  void _sendApplication(String json) {
+  ///
+  /// [role] marks a message that is only valid while that role is active; if
+  /// it is held and the role is gone by the time it could be sent, it is
+  /// dropped.
+  void _sendApplication(String json, {SendspinRole? role}) {
     if (!_activated || !_channel.isEstablished) return;
     if (_rehandshaking) {
-      _held.add(json);
+      _held.add((json, role));
       return;
     }
     _channel.sendJsonText(json);
@@ -543,12 +547,14 @@ class SendspinProtocol {
   /// Throws [StateError] if the controller role is not active.
   void sendControllerCommand(String command) {
     _requireRole(SendspinRole.controller);
-    _sendApplication(jsonEncode({
-      'type': 'client/command',
-      'payload': {
-        'controller': {'command': command},
-      },
-    }));
+    _sendApplication(
+        jsonEncode({
+          'type': 'client/command',
+          'payload': {
+            'controller': {'command': command},
+          },
+        }),
+        role: SendspinRole.controller);
   }
 
   /// Sends a controller volume command (0-100).
@@ -558,12 +564,14 @@ class SendspinProtocol {
   void sendControllerVolume(int volume) {
     _requireRole(SendspinRole.controller);
     RangeError.checkValueInInterval(volume, 0, 100, 'volume');
-    _sendApplication(jsonEncode({
-      'type': 'client/command',
-      'payload': {
-        'controller': {'command': 'volume', 'volume': volume},
-      },
-    }));
+    _sendApplication(
+        jsonEncode({
+          'type': 'client/command',
+          'payload': {
+            'controller': {'command': 'volume', 'volume': volume},
+          },
+        }),
+        role: SendspinRole.controller);
   }
 
   /// Sends a controller mute command.
@@ -571,12 +579,14 @@ class SendspinProtocol {
   /// Throws [StateError] if the controller role is not active.
   void sendControllerMute(bool mute) {
     _requireRole(SendspinRole.controller);
-    _sendApplication(jsonEncode({
-      'type': 'client/command',
-      'payload': {
-        'controller': {'command': 'mute', 'mute': mute},
-      },
-    }));
+    _sendApplication(
+        jsonEncode({
+          'type': 'client/command',
+          'payload': {
+            'controller': {'command': 'mute', 'mute': mute},
+          },
+        }),
+        role: SendspinRole.controller);
   }
 
   /// Update volume from local UI and report to server.
@@ -661,8 +671,10 @@ class SendspinProtocol {
 
     if (type == 'server/hello') return _handleServerHello(payload);
     if (type == 'server/activate') return _handleServerActivate(payload);
-    // The server sends nothing else before its first activation.
-    if (!_activated) return;
+    // The server sends nothing else before its first activation, nor between
+    // a re-handshake and the activation that follows it. Anything that does
+    // arrive then must not be acted on with authorization from the old keys.
+    if (!_activated || _rehandshaking) return;
 
     switch (type) {
       case 'server/time':
@@ -697,10 +709,14 @@ class SendspinProtocol {
     final handshake = _handshake;
     if (handshake == null || !_helloReceived) return;
 
+    // `activities` is required: a list of unique strings. Anything else is
+    // not an activation, and the connection stays as it was.
     final rawActivities = payload['activities'];
-    final activities = rawActivities is List
-        ? rawActivities.whereType<String>().toSet()
-        : const <String>{};
+    if (rawActivities is! List || rawActivities.any((a) => a is! String)) {
+      return;
+    }
+    final activities = rawActivities.cast<String>().toSet();
+    if (activities.length != rawActivities.length) return;
     final rawRoles = payload['active_roles'];
     final explicitRoles =
         rawRoles is List ? rawRoles.whereType<String>().toList() : null;
@@ -792,9 +808,15 @@ class SendspinProtocol {
   void _endRehandshakeWindow() {
     if (!_rehandshaking) return;
     _rehandshaking = false;
-    final held = List<String>.of(_held);
+    final held = List.of(_held);
     _held.clear();
-    if (_activated) held.forEach(_channel.sendJsonText);
+    if (_activated) {
+      for (final (json, role) in held) {
+        // The activation just applied may have removed the role a held
+        // message was written for.
+        if (role == null || isRoleActive(role)) _channel.sendJsonText(json);
+      }
+    }
     if (_clockSyncPaused) {
       _clockSyncPaused = false;
       _timeBurst.start();
@@ -1031,7 +1053,7 @@ class SendspinProtocol {
   /// [onArtworkFrame] only when [SendspinRole.artwork] is active. All other
   /// IDs are silently dropped.
   void _dispatchBinary(Uint8List data) {
-    if (data.isEmpty || !_activated) return;
+    if (data.isEmpty || !_activated || _rehandshaking) return;
     final type = data[0];
 
     if (type >= _binaryTypePlayerMin && type <= _binaryTypePlayerMax) {
@@ -1149,13 +1171,15 @@ class SendspinProtocol {
     _stopStateReporting();
     _clock.reset();
     _arrivalDelay.reset();
-    _discardMetadata();
-    _state = SendspinPlayerState(
+    // One clean state, with nothing of the old connection left in it.
+    _pendingMetadataTimer?.cancel();
+    _pendingMetadataTimer = null;
+    _pendingMetadata = null;
+    _updateState(SendspinPlayerState(
       volume: _state.volume,
       muted: _state.muted,
       staticDelayMs: _state.staticDelayMs,
-    );
-    if (!_stateController.isClosed) _stateController.add(_state);
+    ));
   }
 
   /// Cleans up timers and stream controller.

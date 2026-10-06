@@ -63,8 +63,11 @@ bool _isPairingOffered({
       (matched == SendspinPskCategory.pairing)) {
     return false;
   }
-  return pairingMethod != 'dynamic_pairing_code' ||
-      formats.contains(pairingFormat);
+  // A format belongs to the dynamic code method only: it must be one the
+  // client offers there, and absent for every other method.
+  return pairingMethod == 'dynamic_pairing_code'
+      ? formats.contains(pairingFormat)
+      : pairingFormat == null;
 }
 
 /// Decides how to respond to a `server/activate`, selecting the response by
