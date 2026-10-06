@@ -199,6 +199,16 @@ void main() {
       expect(() => i.decrypt(ciphertext), throwsA(isA<NoiseError>()));
     });
 
+    test('a message over the Noise size limit fails to decrypt', () {
+      final (_, r) = _handshake(v);
+      expect(() => r.decrypt(Uint8List(65536)), throwsA(isA<NoiseError>()));
+    });
+
+    test('a handshake message over the Noise size limit is rejected', () {
+      expect(() => _responder(v).readMessage1(Uint8List(65536)),
+          throwsA(isA<NoiseError>()));
+    });
+
     test('ciphertext is the plaintext plus a 16-byte tag', () {
       final (i, _) = _handshake(v);
       expect(i.encrypt(Uint8List(100)), hasLength(116));

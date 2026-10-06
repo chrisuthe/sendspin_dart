@@ -225,6 +225,8 @@ class SendspinChannel {
       final handshakeData = _handshakeData(json);
       if (handshakeData == null) return _fail('malformed noise/handshake');
       onRehandshakeStarted?.call();
+      // The callback may have reset or closed the channel.
+      if (_session != session) return;
       _respondToMessage1(handshakeData,
           prologue: session.handshakeHash, isRehandshake: true);
       return;
@@ -261,13 +263,19 @@ class SendspinChannel {
     if (message['type'] == 'server/error') {
       final reason = payload['reason'];
       onServerError?.call(reason is String ? reason : 'unknown');
+      // The callback may have reset the channel for a new attempt.
+      if (_phase != _Phase.awaitingServerInit) return;
       return _fail('server/error');
     }
     if (message['type'] != 'server/init') {
       return _fail('expected server/init');
     }
-    // `version` names the single core format the sender speaks: exact match.
-    if (payload['version'] != 1) return _fail('unsupported server version');
+    // `version` names the single core format the sender speaks: an integer,
+    // exact match.
+    final version = payload['version'];
+    if (version is! int || version != 1) {
+      return _fail('unsupported server version');
+    }
 
     final serverId = payload['server_id'];
     final publicKey =
@@ -329,7 +337,13 @@ class SendspinChannel {
     if (category == SendspinPskCategory.sentinel) {
       if (pskId == pskIdOf(sentinelPsk)) psk = sentinelPsk;
     } else {
-      for (final candidate in _pskCandidates?.call() ?? const []) {
+      final List<SendspinPskCandidate> candidates;
+      try {
+        candidates = _pskCandidates?.call() ?? const [];
+      } catch (_) {
+        return _fail('PSK lookup failed');
+      }
+      for (final candidate in candidates) {
         if (candidate.category != category || pskIdOf(candidate.psk) != pskId) {
           continue;
         }
@@ -360,42 +374,69 @@ class SendspinChannel {
       },
     });
 
-    if (isRehandshake) {
-      // Message 2 still travels under the previous keys; everything after it
-      // uses the new ones.
-      sendJsonText(message2);
-    } else {
-      _timeout?.cancel();
-      _timeout = null;
-      onSendText?.call(message2);
-    }
-    _session = handshake.session;
+    // Switch to the new keys before anything is handed to the transport: a
+    // send callback may deliver the server's next message, or reset or close
+    // the channel, before it returns.
+    final previous = _session;
+    final session = handshake.session;
+    final List<Uint8List>? underOldKeys = isRehandshake
+        // Message 2 of a re-handshake still travels under the previous keys.
+        ? _encrypt(previous!, _jsonMessage(message2))
+        : null;
+    _timeout?.cancel();
+    _timeout = null;
+    _session = session;
     _phase = _Phase.transport;
 
+    // Report the new keys first, so whatever the server sends next is
+    // judged against the PSK this handshake matched.
     onHandshakeComplete?.call(SendspinHandshakeResult(
       serverId: _serverId!,
       matchedCategory: matchedCategory,
-      matchedPsk: psk,
+      matchedPsk: Uint8List.fromList(psk),
       sentinelFallback: sentinelFallback,
-      handshakeHash: handshake.session.handshakeHash,
+      handshakeHash: session.handshakeHash,
       isRehandshake: isRehandshake,
     ));
+    // The callback may have reset or closed the channel.
+    if (_session != session) return;
+
+    if (underOldKeys != null) {
+      underOldKeys.forEach(_emitBinary);
+    } else {
+      onSendText?.call(message2);
+    }
   }
 
   // ---------------------------------------------------------------------
   // Outbound
   // ---------------------------------------------------------------------
 
-  /// Sends a JSON message body as an encrypted binary message with ID 0.
-  void sendJsonText(String json) {
+  static Uint8List _jsonMessage(String json) {
     final body = utf8.encode(json);
-    _send(Uint8List(body.length + 1)
+    return Uint8List(body.length + 1)
       ..[0] = messageIdJson
-      ..setRange(1, body.length + 1, body));
+      ..setRange(1, body.length + 1, body);
   }
 
-  /// Sends a binary message whose first byte is its message ID.
-  void sendBinary(Uint8List message) => _send(message);
+  static List<Uint8List> _encrypt(NoiseSession session, Uint8List message) =>
+      [for (final frame in fragmentMessage(message)) session.encrypt(frame)];
+
+  void _emitBinary(Uint8List data) {
+    if (_phase == _Phase.transport) onSendBinary?.call(data);
+  }
+
+  /// Sends a JSON message body as an encrypted binary message with ID 0.
+  void sendJsonText(String json) => _send(_jsonMessage(json));
+
+  /// Sends a binary message whose first byte is its message ID. Fragment
+  /// messages (ID 1) are produced here and cannot be sent directly.
+  void sendBinary(Uint8List message) {
+    if (message.isEmpty || message[0] == messageIdFragment) {
+      throw ArgumentError('A binary message starts with an ID other than 1');
+    }
+    _send(message);
+  }
 
   void _send(Uint8List message) {
     if (_phase == _Phase.closed) return;
@@ -403,8 +444,6 @@ class SendspinChannel {
     if (_phase != _Phase.transport || session == null) {
       throw StateError('Channel is not in transport mode');
     }
-    for (final frame in fragmentMessage(message)) {
-      onSendBinary?.call(session.encrypt(frame));
-    }
+    _encrypt(session, message).forEach(_emitBinary);
   }
 }

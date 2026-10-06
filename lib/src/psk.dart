@@ -33,7 +33,18 @@ enum SendspinPskCategory {
 /// The Sentinel PSK: `SHA-256("sendspin-sentinel-psk-v1")`. It is a published
 /// constant and authenticates nothing on its own.
 final Uint8List sentinelPsk = Uint8List.fromList(
-    _sha256.hashSync(ascii.encode('sendspin-sentinel-psk-v1')).bytes);
+        _sha256.hashSync(ascii.encode('sendspin-sentinel-psk-v1')).bytes)
+    .asUnmodifiableView();
+
+/// Length in bytes of every Sendspin PSK.
+const int pskLength = 32;
+
+void _checkPskLength(Uint8List psk) {
+  if (psk.length != pskLength) {
+    throw ArgumentError.value(
+        psk.length, 'psk.length', 'A Sendspin PSK is $pskLength bytes');
+  }
+}
 
 /// `psk_id = base64url(SHA-256("sendspin-psk-id-v1" || PSK))`, 43 characters.
 String pskIdOf(List<int> psk) => base64UrlNoPad(
@@ -50,9 +61,13 @@ class SendspinPskCandidate {
 
   SendspinPskCandidate.longTerm(
       {required this.psk, required String this.serverId})
-      : category = SendspinPskCategory.longTerm;
+      : category = SendspinPskCategory.longTerm {
+    _checkPskLength(psk);
+  }
 
   SendspinPskCandidate.pairing(this.psk)
       : category = SendspinPskCategory.pairing,
-        serverId = null;
+        serverId = null {
+    _checkPskLength(psk);
+  }
 }
