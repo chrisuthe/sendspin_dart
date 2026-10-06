@@ -191,6 +191,14 @@ void main() {
       expect(store.stored!.records, isEmpty);
     });
 
+    test('a record does not alias or expose a mutable key buffer', () {
+      final key = _seq(1);
+      final record = SendspinPairingRecord(serverId: 's', longTermPsk: key);
+      key[0] ^= 0xFF;
+      expect(record.longTermPsk, _seq(1));
+      expect(() => record.longTermPsk[0] = 0, throwsUnsupportedError);
+    });
+
     test('rejects a long-term PSK that is not 32 bytes', () {
       expect(
           () =>

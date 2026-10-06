@@ -123,6 +123,11 @@ class SendspinPlayer {
   set onPairingAborted(void Function(String reason)? cb) =>
       protocol.onPairingAborted = cb;
 
+  void Function(Object error)? get onPairingStoreError =>
+      protocol.onPairingStoreError;
+  set onPairingStoreError(void Function(Object error)? cb) =>
+      protocol.onPairingStoreError = cb;
+
   String? get serverId => protocol.serverId;
   bool get isPaired => protocol.isPaired;
 

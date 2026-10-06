@@ -26,7 +26,10 @@ class SendspinPairingRecord {
   final String serverId;
   final Uint8List longTermPsk;
 
-  SendspinPairingRecord({required this.serverId, required this.longTermPsk}) {
+  /// The key bytes are copied, and [longTermPsk] is unmodifiable.
+  SendspinPairingRecord(
+      {required this.serverId, required Uint8List longTermPsk})
+      : longTermPsk = Uint8List.fromList(longTermPsk).asUnmodifiableView() {
     _checkLength(longTermPsk, 'longTermPsk');
   }
 
@@ -53,7 +56,12 @@ class SendspinPairingData {
   /// Pairing records, least recently used first.
   final List<SendspinPairingRecord> records;
 
-  SendspinPairingData({required this.pairingPsk, required this.records});
+  /// The pairing PSK is copied and unmodifiable, and so is the record list.
+  SendspinPairingData({
+    required Uint8List pairingPsk,
+    required List<SendspinPairingRecord> records,
+  })  : pairingPsk = Uint8List.fromList(pairingPsk).asUnmodifiableView(),
+        records = List.unmodifiable(records);
 
   Map<String, dynamic> toJson() => {
         'pairing_psk': base64UrlNoPad(pairingPsk),

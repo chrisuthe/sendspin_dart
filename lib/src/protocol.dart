@@ -1157,9 +1157,14 @@ class SendspinProtocol {
     if (type == 'pair/abort') {
       // Has no effect once the attempt is already over.
       if (psk == null) return;
+      // A missing or malformed field in a pairing message is a protocol
+      // error: close without an application-level message.
+      final reason = jsonString(payload['reason']);
+      if (reason == null) {
+        return _channel.close('malformed pair/abort');
+      }
       _endPairingAttempt();
-      final reason = payload['reason'];
-      onPairingAborted?.call(reason is String ? reason : 'unknown');
+      onPairingAborted?.call(reason);
       return;
     }
     if (_pairingAborted) return;
