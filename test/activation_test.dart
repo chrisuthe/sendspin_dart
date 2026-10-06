@@ -86,6 +86,14 @@ void main() {
           _verdict(_sn, ['playback', 'bogus']), ActivationVerdict.unauthorized);
     });
 
+    test('does not apply when the pairing method would still be refused', () {
+      // Enabling unpaired access would allow [playback, pairing], but
+      // pairing_psk on a Sentinel session stays inadmissible, so the first
+      // rule does not apply and the second one does.
+      expect(_verdict(_sn, ['playback', 'pairing'], method: 'pairing_psk'),
+          ActivationVerdict.unauthorized);
+    });
+
     test('does not apply to a paired session', () {
       expect(_verdict(_lt, ['pairing'], method: 'pairing_psk'),
           ActivationVerdict.unauthorized);

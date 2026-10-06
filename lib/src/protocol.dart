@@ -6,6 +6,7 @@ import 'activation.dart';
 import 'arrival_delay.dart';
 import 'channel.dart';
 import 'identity.dart';
+import 'json_util.dart';
 import 'models.dart';
 import 'clock.dart';
 import 'psk.dart';
@@ -405,7 +406,7 @@ class SendspinProtocol {
 
   void _updateState(SendspinPlayerState newState) {
     _state = newState;
-    _stateController.add(newState);
+    if (!_stateController.isClosed) _stateController.add(newState);
   }
 
   /// Called by the player layer to update state (e.g. buffer depth).
@@ -614,6 +615,12 @@ class SendspinProtocol {
 
   void _handleRehandshakeStarted() {
     _rehandshaking = true;
+    // The server must follow a re-handshake with server/activate; do not hold
+    // messages and pause clock sync indefinitely if it never does.
+    _activateTimer?.cancel();
+    _activateTimer = Timer(activateTimeout, () {
+      _channel.close('no server/activate after the re-handshake');
+    });
     // A client/time held until after the re-handshake would measure the hold,
     // not the network, so pause the burst driver instead.
     if (_timeBurst.isStarted) {
@@ -624,8 +631,17 @@ class SendspinProtocol {
 
   void _handleChannelClosed(String reason) {
     _stopTimers();
-    _updateState(
-        _state.copyWith(connectionState: SendspinConnectionState.disconnected));
+    _held.clear();
+    // The session is over, however it ended: stop output and drop what the
+    // server had activated, as if every role had been removed.
+    for (final role in _state.activeRoles) {
+      _handleRoleRemoved(role);
+    }
+    _updateState(_state.copyWith(
+      connectionState: SendspinConnectionState.disconnected,
+      activities: const <String>{},
+      activeRoles: const <String>[],
+    ));
     onClose?.call(reason);
   }
 
@@ -672,7 +688,7 @@ class SendspinProtocol {
     _helloReceived = true;
     _updateState(_state.copyWith(
       connectionState: SendspinConnectionState.syncing,
-      serverName: payload['name'] as String? ?? 'Unknown',
+      serverName: jsonString(payload['name']) ?? 'Unknown',
     ));
     _channel.sendJsonText(buildClientHello());
   }
@@ -690,7 +706,7 @@ class SendspinProtocol {
         rawRoles is List ? rawRoles.whereType<String>().toList() : null;
     // The pairing object only matters when pairing is a declared activity.
     final pairing = activities.contains(activityPairing)
-        ? payload['pairing'] as Map<String, dynamic>?
+        ? jsonObject(payload['pairing'])
         : null;
 
     final verdict = evaluateActivation(
@@ -698,8 +714,8 @@ class SendspinProtocol {
       unpairedAccess: _unpairedAccess,
       activities: activities,
       activeRoles: explicitRoles,
-      pairingMethod: pairing?['method'] as String?,
-      pairingFormat: pairing?['format'] as String?,
+      pairingMethod: jsonString(pairing?['method']),
+      pairingFormat: jsonString(pairing?['format']),
       offeredPairMethods: _offeredPairMethods,
     );
     switch (verdict) {
@@ -708,6 +724,12 @@ class SendspinProtocol {
       case ActivationVerdict.unauthorized:
         return _goodbyeAndClose(SendspinGoodbyeReason.unauthorized);
       case ActivationVerdict.methodNotSupported:
+        // The activation is refused but the connection stays open, so the
+        // server has answered: stop waiting for it, and end the re-handshake
+        // restriction, which lasts only until an activation is received.
+        _activateTimer?.cancel();
+        _activateTimer = null;
+        _endRehandshakeWindow();
         _channel.sendJsonText(jsonEncode({
           'type': 'pair/abort',
           'payload': {'reason': 'method_not_supported'},
@@ -746,19 +768,14 @@ class SendspinProtocol {
     _activateTimer?.cancel();
     _activateTimer = null;
 
-    if (_rehandshaking) {
-      // The restriction on new application messages ends here.
-      _rehandshaking = false;
-      final held = List<String>.of(_held);
-      _held.clear();
-      held.forEach(_channel.sendJsonText);
-      if (_clockSyncPaused) {
-        _clockSyncPaused = false;
-        _timeBurst.start();
-      }
-    }
+    _endRehandshakeWindow();
 
-    if (firstActivation) startClockSync();
+    if (firstActivation) {
+      // Restart rather than start: a burst begun before the activation had
+      // its first message dropped and would sit out a response timeout.
+      _timeBurst.stop();
+      _timeBurst.start();
+    }
 
     // A role that defines a client/state object must be reported when it
     // becomes active, and a client with any active role sends an initial
@@ -768,6 +785,20 @@ class SendspinProtocol {
     }
 
     onActivate?.call(activities, newRoles);
+  }
+
+  /// Ends the restriction on new application messages that a re-handshake
+  /// imposes: releases what was held, in order, and resumes clock sync.
+  void _endRehandshakeWindow() {
+    if (!_rehandshaking) return;
+    _rehandshaking = false;
+    final held = List<String>.of(_held);
+    _held.clear();
+    if (_activated) held.forEach(_channel.sendJsonText);
+    if (_clockSyncPaused) {
+      _clockSyncPaused = false;
+      _timeBurst.start();
+    }
   }
 
   /// Applies the removal of [role] from `active_roles`: stream roles stop
@@ -789,19 +820,24 @@ class SendspinProtocol {
   void _handleGroupUpdate(Map<String, dynamic> payload) {
     final groupState = SendspinGroupState(
       playbackState: SendspinGroupPlaybackState.fromWire(
-          payload['playback_state'] as String?),
-      groupId: payload['group_id'] as String?,
-      groupName: payload['group_name'] as String?,
+          jsonString(payload['playback_state'])),
+      groupId: jsonString(payload['group_id']),
+      groupName: jsonString(payload['group_name']),
     );
     _updateState(_state.copyWith(groupState: groupState));
     onGroupUpdate?.call(groupState);
   }
 
   void _handleServerTime(Map<String, dynamic> payload) {
-    final serverReceived = payload['server_received'] as int? ?? 0;
-    final serverTransmitted = payload['server_transmitted'] as int? ?? 0;
+    final serverReceived = jsonInt(payload['server_received']);
+    final serverTransmitted = jsonInt(payload['server_transmitted']);
     final clientReceived = nowUs();
-    final clientTransmitted = payload['client_transmitted'] as int? ?? 0;
+    final clientTransmitted = jsonInt(payload['client_transmitted']);
+    if (serverReceived == null ||
+        serverTransmitted == null ||
+        clientTransmitted == null) {
+      return;
+    }
 
     // NTP-style offset and round-trip delay.
     final offset = ((serverReceived - clientTransmitted) +
@@ -818,13 +854,13 @@ class SendspinProtocol {
   }
 
   void _handleStreamStart(Map<String, dynamic> payload) {
-    final audioFormat = payload['player'] as Map<String, dynamic>?;
+    final audioFormat = jsonObject(payload['player']);
     if (audioFormat == null || !isRoleActive(SendspinRole.player)) return;
-    final codecName = audioFormat['codec'] as String? ?? 'pcm';
-    final channels = audioFormat['channels'] as int? ?? 2;
-    final sampleRate = audioFormat['sample_rate'] as int? ?? 48000;
-    final bitDepth = audioFormat['bit_depth'] as int? ?? 16;
-    final codecHeader = audioFormat['codec_header'] as String?;
+    final codecName = jsonString(audioFormat['codec']) ?? 'pcm';
+    final channels = jsonInt(audioFormat['channels']) ?? 2;
+    final sampleRate = jsonInt(audioFormat['sample_rate']) ?? 48000;
+    final bitDepth = jsonInt(audioFormat['bit_depth']) ?? 16;
+    final codecHeader = jsonString(audioFormat['codec_header']);
 
     _updateState(_state.copyWith(
       connectionState: SendspinConnectionState.streaming,
@@ -878,10 +914,10 @@ class SendspinProtocol {
   }
 
   void _handleServerCommand(Map<String, dynamic> payload) {
-    final player = payload['player'] as Map<String, dynamic>?;
+    final player = jsonObject(payload['player']);
     if (player == null || !isRoleActive(SendspinRole.player)) return;
 
-    final command = player['command'] as String?;
+    final command = jsonString(player['command']);
     switch (command) {
       case 'volume':
         final vol = player['volume'];
@@ -892,14 +928,14 @@ class SendspinProtocol {
           onVolumeChanged?.call(normalized, _state.muted);
         }
       case 'mute':
-        final muted = player['mute'] as bool?;
+        final muted = jsonBool(player['mute']);
         if (muted != null) {
           _updateState(_state.copyWith(muted: muted));
           _sendApplication(buildClientState());
           onVolumeChanged?.call(_state.volume, muted);
         }
       case 'set_static_delay':
-        final delayMs = player['static_delay_ms'] as int?;
+        final delayMs = jsonInt(player['static_delay_ms']);
         if (delayMs != null) {
           _staticDelayMs = delayMs.clamp(0, 5000);
           _updateState(_state.copyWith(staticDelayMs: _staticDelayMs));
@@ -913,11 +949,11 @@ class SendspinProtocol {
     // Each role object carries that role's full state; an omitted object
     // leaves the role's state, and any pending scheduled update, unchanged.
     final metadataJson = isRoleActive(SendspinRole.metadata)
-        ? payload['metadata'] as Map<String, dynamic>?
+        ? jsonObject(payload['metadata'])
         : null;
     // `timestamp` is required; without it the state cannot be placed in time
     // or have its progress extrapolated, so the object is ignored.
-    if (metadataJson != null && metadataJson['timestamp'] is num) {
+    if (metadataJson != null && jsonInt(metadataJson['timestamp']) != null) {
       // Either way a held pending update is gone: a future-timestamped state
       // replaces it, a past or present one discards it.
       _pendingMetadata = SendspinMetadata.fromJson(metadataJson);
@@ -925,7 +961,7 @@ class SendspinProtocol {
     }
 
     final controller = isRoleActive(SendspinRole.controller)
-        ? _parseController(payload['controller'] as Map<String, dynamic>?)
+        ? _parseController(jsonObject(payload['controller']))
         : null;
     if (controller != null) {
       _updateState(_state.copyWith(controller: controller));
@@ -974,12 +1010,12 @@ class SendspinProtocol {
 
   SendspinControllerInfo? _parseController(Map<String, dynamic>? json) {
     if (json == null) return null;
-    final rawCommands = json['supported_commands'] as List?;
+    final rawCommands = jsonList(json['supported_commands']);
     return SendspinControllerInfo(
       supportedCommands:
           rawCommands?.whereType<String>().toList() ?? const <String>[],
-      volume: (json['volume'] as num?)?.toInt() ?? 0,
-      muted: json['muted'] as bool? ?? false,
+      volume: jsonInt(json['volume']) ?? 0,
+      muted: jsonBool(json['muted']) ?? false,
     );
   }
 
@@ -1060,7 +1096,12 @@ class SendspinProtocol {
   /// each burst is fed to the Kalman filter. Sending in parallel and
   /// updating on every reply violates the filter's measurement-independence
   /// assumption on TCP/WebSocket transports.
+  ///
+  /// Clock sync starts by itself on the first `server/activate` and pauses
+  /// around a re-handshake; outside those points this has no effect, since
+  /// `client/time` may not be sent.
   void startClockSync() {
+    if (!_activated || _rehandshaking) return;
     _timeBurst.start();
   }
 
@@ -1114,7 +1155,7 @@ class SendspinProtocol {
       muted: _state.muted,
       staticDelayMs: _state.staticDelayMs,
     );
-    _stateController.add(_state);
+    if (!_stateController.isClosed) _stateController.add(_state);
   }
 
   /// Cleans up timers and stream controller.
