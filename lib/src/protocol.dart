@@ -208,6 +208,7 @@ class SendspinProtocol {
   /// The `available` and `min_buffer_ms` values last put on the wire, to
   /// notice when the time filter or the delay measurement changes them.
   bool? _reportedAvailable;
+  bool _stateHeld = false;
   int? _reportedMinBufferMs;
 
   SendspinPlayerState _state = const SendspinPlayerState();
@@ -566,6 +567,12 @@ class SendspinProtocol {
 
   /// Sends `client/state` and remembers the derived values it carried.
   void _sendState() {
+    if (_activated && _rehandshaking) {
+      // Every client/state is the full state, so rather than hold several
+      // that will be stale, send one fresh one when the window ends.
+      _stateHeld = true;
+      return;
+    }
     _reportedAvailable = isAvailable;
     _reportedMinBufferMs = reportedMinBufferMs;
     _sendApplication(buildClientState());
@@ -954,6 +961,9 @@ class SendspinProtocol {
     if (added.isNotEmpty || (firstActivation && newRoles.isNotEmpty)) {
       _sendState();
     }
+    // Removing the player role can make the client available: nothing
+    // depends on the clock any more.
+    _reportStateIfChanged();
 
     onActivate?.call(activities, newRoles);
   }
@@ -971,6 +981,10 @@ class SendspinProtocol {
         // message was written for.
         if (role == null || isRoleActive(role)) _channel.sendJsonText(json);
       }
+    }
+    if (_stateHeld) {
+      _stateHeld = false;
+      _sendState();
     }
     if (_clockSyncPaused) {
       _clockSyncPaused = false;
@@ -1312,6 +1326,7 @@ class SendspinProtocol {
     _playerStreamActive = false;
     _held.clear();
     _reportedAvailable = null;
+    _stateHeld = false;
     _reportedMinBufferMs = null;
     _timeBurst.reset();
     _clock.reset();

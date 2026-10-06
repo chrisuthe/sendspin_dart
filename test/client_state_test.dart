@@ -203,6 +203,49 @@ void main() {
       });
     });
 
+    test('available is re-reported when the player role is removed', () {
+      final protocol = _protocol(
+          roles: const {SendspinRole.player, SendspinRole.controller});
+      final server = connect(protocol, activate: false);
+      activate(server, protocol);
+      // Unsynchronized player: unavailable.
+      expect(_lastState(protocol)['available'], isFalse);
+      server.receivedJson.clear();
+
+      // Without the player role nothing depends on the clock any more.
+      activate(server, protocol, roles: ['controller@v1']);
+      expect(_lastState(protocol), {'available': true});
+    });
+
+    test('state changed during a re-handshake is sent once, fresh', () {
+      final pairingPsk = Uint8List.fromList(List<int>.filled(32, 9));
+      final protocol = SendspinProtocol(
+        playerName: 'P',
+        identity: testIdentity,
+        bufferSeconds: 5,
+        unpairedAccess: true,
+        pskCandidates: () => [SendspinPskCandidate.pairing(pairingPsk)],
+      );
+      addTearDown(protocol.dispose);
+      final server = connect(protocol);
+      _synchronize(protocol);
+      server.receivedJson.clear();
+
+      server.startRehandshake(pairingPsk, 'pr');
+      protocol.updateVolume(0.3);
+      protocol.updateVolume(0.6);
+      protocol.updateMuted(true);
+      server.sendJson('server/activate', {
+        'activities': ['playback']
+      });
+
+      final states = sentOfType(protocol, 'client/state');
+      expect(states, hasLength(1));
+      expect(states.single['payload']['player'], containsPair('volume', 60));
+      expect(states.single['payload']['player'], containsPair('muted', true));
+      expect(states.single['payload']['available'], isTrue);
+    });
+
     test('setAvailable(false) reports unavailable and true restores it', () {
       final protocol = _protocol();
       connect(protocol);
