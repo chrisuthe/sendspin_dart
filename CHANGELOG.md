@@ -27,7 +27,10 @@ protocol. It cannot talk to pre-rc1 servers.
   in the future (per the time filter's current estimate) is held as
   `pendingMetadata` and applied when that moment is reached. A newer future
   update replaces it; a past or present one discards it. `onMetadataUpdate`
-  fires when a state takes effect, not when it is received.
+  fires when a state takes effect, not when it is received. The held update
+  is re-evaluated whenever the time filter is updated, and a state received
+  before the filter has any sample is applied immediately. A `metadata`
+  object without a `timestamp` is ignored.
 - New `currentTrackPositionMs` extrapolates the position from the current
   state only, never from the pending update.
 - `group/update` replaces the group state; `SendspinGroupState.mergeDelta` is

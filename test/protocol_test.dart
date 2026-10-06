@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/src/protocol.dart';
 import 'package:sendspin_dart/src/models.dart';
@@ -1164,6 +1166,15 @@ void main() {
       expect(p.currentTrackPositionMs, isNull);
     });
 
+    test('a metadata object without a timestamp is ignored', () {
+      sendMetadata({'timestamp': 0, 'title': 'Song'});
+      var calls = 0;
+      p.onMetadataUpdate = (_) => calls++;
+      sendMetadata({'title': 'No timestamp'});
+      expect(p.state.metadata!.title, 'Song');
+      expect(calls, 0);
+    });
+
     test('omitting the metadata object leaves the state unchanged', () {
       sendMetadata({'timestamp': 0, 'title': 'Song'});
       var calls = 0;
@@ -1184,172 +1195,268 @@ void main() {
   });
 
   group('server/state scheduled metadata', () {
-    late int now;
-    late SendspinProtocol p;
+    const startUs = 1000000;
 
-    setUp(() {
-      now = 1000000;
-      // The time filter starts as the identity mapping, so server timestamps
-      // are compared directly against the injected local clock.
-      p = SendspinProtocol(
-        playerName: 'T',
-        clientId: 'c',
-        bufferSeconds: 2,
-        now: () => now,
-      );
-    });
-    tearDown(() => p.dispose());
+    /// Runs [body] under fake time with a protocol whose local clock follows
+    /// it. [skewUs] lets a test move the local clock relative to the timers.
+    void withProtocol(
+      void Function(FakeAsync async, SendspinProtocol p, _Skew skew) body, {
+      bool synchronized = true,
+    }) {
+      fakeAsync((async) {
+        final skew = _Skew();
+        final p = SendspinProtocol(
+          playerName: 'T',
+          clientId: 'c',
+          bufferSeconds: 2,
+          now: () => startUs + async.elapsed.inMicroseconds + skew.us,
+        );
+        if (synchronized) {
+          // server clock == local clock.
+          p.clock.update(0, 100, 1);
+          p.clock.update(0, 100, 2);
+        }
+        body(async, p, skew);
+        p.dispose();
+      });
+    }
 
-    void sendMetadata(Map<String, dynamic> metadata) {
+    void sendMetadata(SendspinProtocol p, Map<String, dynamic> metadata) {
       p.handleTextMessage(jsonEncode({
         'type': 'server/state',
         'payload': {'metadata': metadata},
       }));
     }
 
+    const ms = Duration(milliseconds: 1);
+
     test('a past or present timestamp applies immediately', () {
-      sendMetadata({'timestamp': now, 'title': 'Now'});
-      expect(p.state.metadata!.title, 'Now');
-      expect(p.pendingMetadata, isNull);
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs, 'title': 'Now'});
+        expect(p.state.metadata!.title, 'Now');
+        expect(p.pendingMetadata, isNull);
+      });
     });
 
     test('a future timestamp is held as the pending update', () {
-      sendMetadata({'timestamp': now - 1, 'title': 'Current'});
-      final applied = <String?>[];
-      p.onMetadataUpdate = (m) => applied.add(m.title);
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs - 1, 'title': 'Current'});
+        final applied = <String?>[];
+        p.onMetadataUpdate = (m) => applied.add(m.title);
 
-      sendMetadata({'timestamp': now + 5000000, 'title': 'Next'});
+        sendMetadata(p, {'timestamp': startUs + 5000000, 'title': 'Next'});
+        async.elapse(ms * 4999);
 
-      expect(p.state.metadata!.title, 'Current');
-      expect(p.pendingMetadata!.title, 'Next');
-      expect(applied, isEmpty);
+        expect(p.state.metadata!.title, 'Current');
+        expect(p.pendingMetadata!.title, 'Next');
+        expect(applied, isEmpty);
+      });
     });
 
-    test('the pending update is applied when its time is reached', () async {
-      sendMetadata({'timestamp': now - 1, 'title': 'Current'});
-      final applied = <String?>[];
-      p.onMetadataUpdate = (m) => applied.add(m.title);
+    test('the pending update is applied when its time is reached', () {
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs - 1, 'title': 'Current'});
+        final applied = <String?>[];
+        p.onMetadataUpdate = (m) => applied.add(m.title);
 
-      sendMetadata({'timestamp': now + 20000, 'title': 'Next'});
-      now += 20000;
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Next'});
+        async.elapse(ms * 20);
 
-      expect(p.state.metadata!.title, 'Next');
-      expect(p.pendingMetadata, isNull);
-      expect(applied, ['Next']);
+        expect(p.state.metadata!.title, 'Next');
+        expect(p.pendingMetadata, isNull);
+        expect(applied, ['Next']);
+      });
     });
 
-    test('a newer future update replaces the held one', () async {
-      sendMetadata({'timestamp': now + 20000, 'title': 'First'});
-      sendMetadata({'timestamp': now + 30000, 'title': 'Second'});
-      expect(p.pendingMetadata!.title, 'Second');
+    test('a newer future update replaces the held one', () {
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'First'});
+        sendMetadata(p, {'timestamp': startUs + 30000, 'title': 'Second'});
+        expect(p.pendingMetadata!.title, 'Second');
 
-      now += 30000;
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      expect(p.state.metadata!.title, 'Second');
+        async.elapse(ms * 25);
+        expect(p.state.metadata, isNull, reason: 'First must not be applied');
+        async.elapse(ms * 5);
+        expect(p.state.metadata!.title, 'Second');
+      });
     });
 
-    test('an immediate update discards the held pending update', () async {
-      sendMetadata({'timestamp': now + 20000, 'title': 'Scheduled'});
-      sendMetadata({'timestamp': now, 'title': 'Cancelled it'});
-      expect(p.pendingMetadata, isNull);
+    test('an immediate update discards the held pending update', () {
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Scheduled'});
+        sendMetadata(p, {'timestamp': startUs, 'title': 'Cancelled it'});
+        expect(p.pendingMetadata, isNull);
 
-      now += 20000;
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      expect(p.state.metadata!.title, 'Cancelled it');
+        async.elapse(ms * 50);
+        expect(p.state.metadata!.title, 'Cancelled it');
+      });
     });
 
     test('omitting metadata leaves the pending update in place', () {
-      sendMetadata({'timestamp': now + 5000000, 'title': 'Next'});
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': <String, dynamic>{},
-      }));
-      expect(p.pendingMetadata!.title, 'Next');
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs + 5000000, 'title': 'Next'});
+        p.handleTextMessage(jsonEncode({
+          'type': 'server/state',
+          'payload': <String, dynamic>{},
+        }));
+        expect(p.pendingMetadata!.title, 'Next');
+      });
     });
 
-    test('resetForNewConnection discards state and pending update', () async {
-      sendMetadata({'timestamp': now, 'title': 'Current'});
-      sendMetadata({'timestamp': now + 20000, 'title': 'Next'});
-      p.resetForNewConnection();
-      expect(p.state.metadata, isNull);
-      expect(p.pendingMetadata, isNull);
+    test('waits out the remainder if the local clock is behind the timer', () {
+      withProtocol((async, p, skew) {
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Next'});
+        // The local clock now reads 10 ms earlier than when the timer was
+        // armed, so when the timer fires the update is still 10 ms away.
+        skew.us = -10000;
+        async.elapse(ms * 20);
+        expect(p.state.metadata, isNull);
+        expect(p.pendingMetadata!.title, 'Next');
 
-      now += 20000;
-      await Future<void>.delayed(const Duration(milliseconds: 80));
-      expect(p.state.metadata, isNull);
+        async.elapse(ms * 10);
+        expect(p.state.metadata!.title, 'Next');
+      });
+    });
+
+    test('applies immediately while the time filter has no samples', () {
+      withProtocol((async, p, _) {
+        // With no samples the filter cannot place a server timestamp at all.
+        sendMetadata(p, {'timestamp': startUs + 3600000000, 'title': 'First'});
+        expect(p.state.metadata!.title, 'First');
+        expect(p.pendingMetadata, isNull);
+      }, synchronized: false);
+    });
+
+    test('re-evaluates the pending update when the time filter moves', () {
+      withProtocol((async, p, _) {
+        // Answer every client/time with a server clock [offsetUs] ahead.
+        var offsetUs = 0;
+        p.onSendText = (text) {
+          final msg = jsonDecode(text) as Map<String, dynamic>;
+          if (msg['type'] != 'client/time') return;
+          final t = (msg['payload'] as Map)['client_transmitted'] as int;
+          final reply = jsonEncode({
+            'type': 'server/time',
+            'payload': {
+              'client_transmitted': t,
+              'server_received': t + offsetUs,
+              'server_transmitted': t + offsetUs,
+            },
+          });
+          // The burst driver is not re-entrant; answer after it returns.
+          scheduleMicrotask(() => p.handleTextMessage(reply));
+        };
+
+        // First burst: the filter believes server == local.
+        p.startClockSync();
+        async.flushMicrotasks();
+        expect(p.clock.sampleCount, 1);
+
+        const hourUs = 3600000000;
+        sendMetadata(p, {'timestamp': startUs + hourUs, 'title': 'Held'});
+        expect(p.pendingMetadata!.title, 'Held');
+
+        // Second burst, 10 s later: the server clock is really 2 h ahead, so
+        // the held timestamp is in the past.
+        offsetUs = 2 * hourUs;
+        async.elapse(const Duration(seconds: 10));
+
+        expect(p.clock.sampleCount, 2);
+        expect(p.state.metadata!.title, 'Held');
+        expect(p.pendingMetadata, isNull);
+      }, synchronized: false);
+    });
+
+    test('resetForNewConnection discards state and pending update', () {
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs, 'title': 'Current'});
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Next'});
+        p.resetForNewConnection();
+        expect(p.state.metadata, isNull);
+        expect(p.pendingMetadata, isNull);
+
+        async.elapse(ms * 50);
+        expect(p.state.metadata, isNull);
+      });
+    });
+
+    test('dispose drops the pending update', () {
+      withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Next'});
+        p.dispose();
+        expect(p.pendingMetadata, isNull);
+        async.elapse(ms * 50);
+        expect(p.state.metadata, isNull);
+      });
     });
 
     test('the timestamp is translated through the time filter', () {
-      // server = client + 10 s, so a server timestamp 5 s ahead of the local
-      // clock value is actually 5 s in the past.
-      p.clock.update(10000000, 100, 1);
-      p.clock.update(10000000, 100, 2);
-      sendMetadata({'timestamp': now + 5000000, 'title': 'Past'});
-      expect(p.state.metadata!.title, 'Past');
-      expect(p.pendingMetadata, isNull);
+      withProtocol((async, p, _) {
+        // server = client + 10 s, so a server timestamp 5 s ahead of the
+        // local clock value is actually 5 s in the past.
+        p.clock.update(10000000, 100, 1);
+        p.clock.update(10000000, 100, 2);
+        sendMetadata(p, {'timestamp': startUs + 5000000, 'title': 'Past'});
+        expect(p.state.metadata!.title, 'Past');
+        expect(p.pendingMetadata, isNull);
+      }, synchronized: false);
     });
 
+    Map<String, dynamic> progress(int position, int duration, int speed) => {
+          'track_progress': position,
+          'track_duration': duration,
+          'playback_speed': speed,
+        };
+
     test('position is extrapolated from the current state', () {
-      sendMetadata({
-        'timestamp': now,
-        'progress': {
-          'track_progress': 5000,
-          'track_duration': 240000,
-          'playback_speed': 1000,
-        },
+      withProtocol((async, p, _) {
+        sendMetadata(p,
+            {'timestamp': startUs, 'progress': progress(5000, 240000, 1000)});
+        async.elapse(const Duration(seconds: 2));
+        expect(p.currentTrackPositionMs, 7000);
       });
-      now += 2000000;
-      expect(p.currentTrackPositionMs, 7000);
     });
 
     test('position honours playback speed and clamps to the duration', () {
-      sendMetadata({
-        'timestamp': now,
-        'progress': {
-          'track_progress': 5000,
-          'track_duration': 8000,
-          'playback_speed': 2000,
-        },
+      withProtocol((async, p, _) {
+        sendMetadata(
+            p, {'timestamp': startUs, 'progress': progress(5000, 8000, 2000)});
+        async.elapse(const Duration(seconds: 1));
+        expect(p.currentTrackPositionMs, 7000);
+        async.elapse(const Duration(seconds: 1));
+        expect(p.currentTrackPositionMs, 8000);
       });
-      now += 1000000;
-      expect(p.currentTrackPositionMs, 7000);
-      now += 1000000;
-      expect(p.currentTrackPositionMs, 8000);
     });
 
     test('position is unbounded when the duration is unknown', () {
-      sendMetadata({
-        'timestamp': now,
-        'progress': {
-          'track_progress': 5000,
-          'track_duration': 0,
-          'playback_speed': 1000,
-        },
+      withProtocol((async, p, _) {
+        sendMetadata(
+            p, {'timestamp': startUs, 'progress': progress(5000, 0, 1000)});
+        async.elapse(const Duration(seconds: 10));
+        expect(p.currentTrackPositionMs, 15000);
       });
-      now += 10000000;
-      expect(p.currentTrackPositionMs, 15000);
+    });
+
+    test('position never goes below zero', () {
+      withProtocol((async, p, skew) {
+        sendMetadata(p,
+            {'timestamp': startUs, 'progress': progress(1000, 240000, 1000)});
+        skew.us = -5000000;
+        expect(p.currentTrackPositionMs, 0);
+      });
     });
 
     test('position never extrapolates from the pending update', () {
-      sendMetadata({
-        'timestamp': now,
-        'progress': {
-          'track_progress': 5000,
-          'track_duration': 240000,
-          'playback_speed': 0,
-        },
+      withProtocol((async, p, _) {
+        sendMetadata(
+            p, {'timestamp': startUs, 'progress': progress(5000, 240000, 0)});
+        sendMetadata(p, {
+          'timestamp': startUs + 5000000,
+          'progress': progress(0, 100000, 1000),
+        });
+        async.elapse(const Duration(seconds: 1));
+        expect(p.currentTrackPositionMs, 5000);
       });
-      sendMetadata({
-        'timestamp': now + 5000000,
-        'progress': {
-          'track_progress': 0,
-          'track_duration': 100000,
-          'playback_speed': 1000,
-        },
-      });
-      now += 1000000;
-      expect(p.currentTrackPositionMs, 5000);
     });
   });
 
@@ -1444,7 +1551,7 @@ void main() {
       p.handleTextMessage(jsonEncode({
         'type': 'server/state',
         'payload': {
-          'metadata': {'title': 'T'},
+          'metadata': {'timestamp': 0, 'title': 'T'},
           'controller': {'volume': 10},
         },
       }));
@@ -1783,4 +1890,9 @@ void main() {
       p.dispose();
     });
   });
+}
+
+/// Mutable offset applied to a test's injected local clock.
+class _Skew {
+  int us = 0;
 }

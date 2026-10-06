@@ -452,7 +452,7 @@ void main() {
       player.handleTextMessage(jsonEncode({
         'type': 'server/state',
         'payload': {
-          'metadata': {'title': 'Song', 'artist': 'A'},
+          'metadata': {'timestamp': 0, 'title': 'Song', 'artist': 'A'},
         },
       }));
       expect(received, isNotNull);
