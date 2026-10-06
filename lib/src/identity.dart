@@ -64,12 +64,24 @@ class SendspinIdentity {
     return SendspinIdentity._(private, _derivePublicKey(private));
   }
 
+  /// In-flight [loadOrCreate] calls, one per store instance.
+  static final Expando<Future<SendspinIdentity>> _loading =
+      Expando<Future<SendspinIdentity>>();
+
   /// Loads the identity from [store], generating and saving one only when the
   /// store is empty.
   ///
   /// A stored key of the wrong length throws [StateError] instead of being
   /// replaced: silently regenerating would rotate the device's identity.
-  static Future<SendspinIdentity> loadOrCreate(
+  ///
+  /// Overlapping calls for the same [store] share one load, so two callers
+  /// racing on an empty store cannot each generate and save a different key.
+  /// Separate store instances over the same storage are not coordinated.
+  static Future<SendspinIdentity> loadOrCreate(SendspinIdentityStore store) =>
+      _loading[store] ??=
+          _loadOrCreate(store).whenComplete(() => _loading[store] = null);
+
+  static Future<SendspinIdentity> _loadOrCreate(
       SendspinIdentityStore store) async {
     final stored = await store.loadPrivateKey();
     if (stored != null) {
