@@ -50,6 +50,14 @@ void _addStream(SendspinBuffer b, int startUs, {double seconds = 1}) {
   }
 }
 
+/// A buffer whose clock mapping can be shifted: with `skewUs = -500` all
+/// audio becomes due 500 µs earlier, i.e. playback is suddenly 500 µs late.
+class _Skewed {
+  int skewUs = 0;
+  late final SendspinBuffer buffer =
+      SendspinBuffer(serverToLocalUs: (t) => t + skewUs, maxBufferMs: 10000);
+}
+
 void main() {
   group('scheduling against the local clock', () {
     test('returns silence when nothing is buffered', () {
@@ -134,13 +142,6 @@ void main() {
       expect(b.bufferDepthMs, 10);
       expect(_left(b.pullSamples(_pullFrames * 2, 1000000)).first, 100);
     });
-
-    test('a pull size that is not a whole number of frames is rejected', () {
-      final b = _buffer();
-      _add(b, 1000000, _ramp(100, _pullFrames));
-      b.pullSamples(960, 1000000);
-      expect(() => b.pullSamples(961, 1010000), throwsArgumentError);
-    });
   });
 
   group('output delay', () {
@@ -214,11 +215,13 @@ void main() {
     });
 
     test('an error beyond 1 ms is corrected in one step, not gradually', () {
-      final b = _buffer();
+      final s = _Skewed();
+      final b = s.buffer;
       _addStream(b, 1000000);
       b.pullSamples(_pullFrames * 2, 1000000);
-      // The output clock jumps 3 ms ahead of the audio.
-      final left = _left(b.pullSamples(_pullFrames * 2, 1013000));
+      // The clock estimate moves: all audio is now due 3 ms earlier.
+      s.skewUs = -3000;
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
       expect(left.first, 1 + 480 + 144 + 1);
       expect(b.resyncCount, 2);
       expect(b.framesDropped, 0, reason: 'a resync is not a soft correction');
@@ -275,11 +278,13 @@ void main() {
     }
 
     test('an error inside the dead band is left alone', () {
-      final b = _buffer();
+      final s = _Skewed();
+      final b = s.buffer;
       _addStream(b, 1000000);
       b.pullSamples(_pullFrames * 2, 1000000);
       // 60 µs late: under the 100 µs dead band.
-      final left = _left(b.pullSamples(_pullFrames * 2, 1010060));
+      s.skewUs = -60;
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
       expect(left.first, 1 + 480 + 1);
       expect(b.framesDropped, 0);
       expect(b.framesInserted, 0);
@@ -302,12 +307,14 @@ void main() {
       expect(b.syncErrorUs.abs(), lessThan(200));
     });
 
-    test('corrects by one frame per pull at 48 kHz', () {
-      final b = _buffer();
+    test('corrects by one frame per 10 ms pull at 48 kHz', () {
+      final s = _Skewed();
+      final b = s.buffer;
       _addStream(b, 1000000);
       b.pullSamples(_pullFrames * 2, 1000000);
       // 500 µs late: 24 frames behind, but only one is dropped now.
-      final left = _left(b.pullSamples(_pullFrames * 2, 1010500));
+      s.skewUs = -500;
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
       expect(b.framesDropped, 1);
       expect(left.first, 1 + 480 + 1 + 1);
       // The rest of the pull is untouched audio.
@@ -315,28 +322,42 @@ void main() {
     });
 
     test('a duplicated frame repeats and the rest is bit-exact', () {
-      final b = _buffer();
+      final s = _Skewed();
+      final b = s.buffer;
       _addStream(b, 1000000);
       b.pullSamples(_pullFrames * 2, 1000000);
       // 500 µs early.
-      final left = _left(b.pullSamples(_pullFrames * 2, 1009500));
+      s.skewUs = 500;
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
       expect(b.framesInserted, 1);
       expect(left[0], left[1]);
       expect(left.last, left[1] + 478);
     });
 
+    test('a long pull may take several steps, a short one waits its turn', () {
+      // 100 ms pulls: five 21 µs steps fit under the limit.
+      final long = _Skewed();
+      _addStream(long.buffer, 1000000);
+      long.buffer.pullSamples(4800 * 2, 1000000);
+      long.skewUs = -900;
+      long.buffer.pullSamples(4800 * 2, 1100000);
+      expect(long.buffer.framesDropped, 5);
+    });
+
     test('the correction rate stays within 0.5% over any 150 ms', () {
       for (final pullFrames in [64, 128, 480, 1024, 4800]) {
-        final b = _buffer();
+        final s = _Skewed();
+        final b = s.buffer;
         _addStream(b, 1000000, seconds: 3);
         final pullUs = pullFrames * 1000000 / _rate;
-        // Aligned at startup, then the output clock sits 900 µs ahead: an
-        // error that always wants correcting but never forces a resync.
         final history = <(double, int)>[];
         var corrected = 0;
         for (var p = 0; p * pullUs < 2000000; p++) {
           final t = 1000000 + p * pullUs;
-          b.pullSamples(pullFrames * 2, (t + (p == 0 ? 0 : 900)).round());
+          // Aligned at startup, then the audio is 900 µs behind: an error
+          // that always wants correcting but never forces a resync.
+          if (p == 1) s.skewUs = -900;
+          b.pullSamples(pullFrames * 2, t.round());
           final now = b.framesDropped + b.framesInserted;
           history.add((t, now - corrected));
           corrected = now;
@@ -348,25 +369,151 @@ void main() {
               reason: 'pull of $pullFrames frames at ${t.round()} us');
         }
         expect(corrected, greaterThan(0), reason: 'pull of $pullFrames frames');
+        expect(b.resyncCount, 1, reason: 'pull of $pullFrames frames');
       }
     });
 
     test('scales the step with the sample rate', () {
       SendspinBuffer at(int rate) {
-        final b = _buffer();
+        final s = _Skewed();
+        final b = s.buffer;
         final frames = rate ~/ 100;
         for (var c = 0; c < 10; c++) {
           b.addChunk(1000000 + c * 10000, Int16List(frames * 2),
               sampleRate: rate, channels: 2);
         }
         b.pullSamples(frames * 2, 1000000);
-        b.pullSamples(frames * 2, 1010500);
+        s.skewUs = -500;
+        b.pullSamples(frames * 2, 1010000);
         return b;
       }
 
       expect(at(44100).framesDropped, 1);
       expect(at(96000).framesDropped, 2);
       expect(at(192000).framesDropped, 4);
+    });
+  });
+
+  group('output clock', () {
+    /// Plays ten minutes of [rate] audio in [pullFrames] pulls, with the
+    /// time passed for each pull off by up to [jitterUs] either way.
+    SendspinBuffer playJittery(int rate, int pullFrames, int jitterUs) {
+      final b = _buffer();
+      final pullUs = pullFrames * 1000000 / rate;
+      const totalUs = 600 * 1000000;
+      var nextChunkUs = 1000000;
+      var seed = 12345;
+      for (var p = 0; p * pullUs < totalUs; p++) {
+        final t = 1000000 + p * pullUs;
+        // Keep about a second of 20 ms chunks buffered ahead.
+        while (nextChunkUs < t + 1000000) {
+          b.addChunk(nextChunkUs, Int16List(rate ~/ 50 * 2),
+              sampleRate: rate, channels: 2);
+          nextChunkUs += 20000;
+        }
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        final jitter =
+            jitterUs == 0 ? 0 : (seed % (2 * jitterUs + 1)) - jitterUs;
+        b.pullSamples(pullFrames * 2, t.round() + jitter);
+      }
+      return b;
+    }
+
+    test('jitter in the reported output time is not chased', () {
+      // A real audio callback reports "now + latency" with scheduling
+      // noise. The audio itself is exactly on time throughout.
+      for (final jitterUs in [150, 500, 1500]) {
+        final b = playJittery(48000, 480, jitterUs);
+        expect(b.resyncCount, 1, reason: '±$jitterUs µs of jitter');
+        // Ten minutes is 28.8 million frames; a real 100 ppm drift would
+        // need about 2900 corrections.
+        expect(b.framesDropped + b.framesInserted, lessThan(200),
+            reason: '±$jitterUs µs of jitter over ten minutes');
+      }
+    });
+
+    test('a steady drift of the output device is followed without lag', () {
+      // The device's sample clock runs 100 ppm fast and its reports jitter
+      // by ±500 µs. The drift is real and is corrected frame by frame; the
+      // jitter is not chased.
+      final b = _buffer();
+      const pullUs = 10000.0;
+      var nextChunkUs = 1000000;
+      var seed = 99;
+      var worstUs = 0;
+      for (var p = 0; p < 30000; p++) {
+        final t = 1000000 + p * pullUs * (1 + 100 / 1e6);
+        while (nextChunkUs < t + 1000000) {
+          b.addChunk(nextChunkUs, Int16List(960 * 2),
+              sampleRate: _rate, channels: 2);
+          nextChunkUs += 20000;
+        }
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        b.pullSamples(_pullFrames * 2, t.round() + (seed % 1001) - 500);
+        // Let the loop settle before judging the error.
+        if (p > 2000 && b.syncErrorUs.abs() > worstUs) {
+          worstUs = b.syncErrorUs.abs();
+        }
+      }
+      expect(b.resyncCount, 1);
+      // 300 s at 100 ppm is 30 ms: 1440 frames at 48 kHz.
+      expect(b.framesDropped, inInclusiveRange(1380, 1500));
+      expect(b.framesInserted, lessThan(20));
+      expect(worstUs, lessThan(250));
+    });
+
+    test('a jump in the reported time is taken as a real discontinuity', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      // The consumer stalled: its next pull is 30 ms further on.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1040000));
+      expect(left.first, 1 + 4 * 480 + 1);
+    });
+
+    test('buffer depth stays exact over an hour of awkward pull sizes', () {
+      // 960-frame chunks consumed 128 frames at a time: the two do not
+      // divide evenly in microseconds.
+      final b = _buffer();
+      const pullFrames = 128;
+      final pullUs = pullFrames * 1000000 / _rate;
+      var nextChunkUs = 1000000;
+      for (var p = 0; p * pullUs < 3600 * 1000000; p++) {
+        final t = 1000000 + p * pullUs;
+        while (nextChunkUs < t + 500000) {
+          b.addChunk(nextChunkUs, Int16List(960 * 2),
+              sampleRate: _rate, channels: 2);
+          nextChunkUs += 20000;
+        }
+        b.pullSamples(pullFrames * 2, t.round());
+      }
+      expect(b.bufferDepthMs, inInclusiveRange(480, 520));
+      expect(b.resyncCount, 1);
+      expect(b.framesDropped + b.framesInserted, 0);
+    });
+
+    test('44.1 kHz with irregular pulls needs no correction', () {
+      final b = playJittery(44100, 512, 0);
+      expect(b.resyncCount, 1);
+      expect(b.framesDropped + b.framesInserted, 0);
+      expect(b.syncErrorUs.abs(), lessThan(30));
+    });
+  });
+
+  group('awkward pulls', () {
+    test('a count that is not a whole number of frames is floored', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      final out = b.pullSamples(961, 1000000);
+      expect(out, hasLength(961));
+      expect(out[958], 100 + 479);
+      expect(out[960], 0, reason: 'the odd sample is silence');
+    });
+
+    test('a zero-length pull returns nothing and does not throw', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      expect(b.pullSamples(0, 1000000), isEmpty);
     });
   });
 

@@ -1260,6 +1260,8 @@ class SendspinProtocol {
     final sampleRate = jsonInt(audioFormat['sample_rate']) ?? 48000;
     final bitDepth = jsonInt(audioFormat['bit_depth']) ?? 16;
     final codecHeader = jsonString(audioFormat['codec_header']);
+    // A format that cannot describe audio is not acted on.
+    if (channels <= 0 || sampleRate <= 0 || bitDepth <= 0) return;
 
     _updateState(_state.copyWith(
       connectionState: SendspinConnectionState.streaming,

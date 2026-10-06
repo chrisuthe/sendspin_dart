@@ -176,7 +176,11 @@ void main() {
         rig.chunk(2000000 + c * 10000, 100 + c * _frames);
       }
       rig.pull(2000000);
-      rig.pull(2010040);
+      // The filter's estimate moves 40 µs: the audio is now that much late.
+      rig.player.protocol.clock.reset();
+      rig.player.protocol.clock.update(_offsetUs + 40, 100, 1);
+      rig.player.protocol.clock.update(_offsetUs + 40, 100, 2);
+      rig.pull(2010000);
       expect(rig.player.syncErrorUs, 40);
     });
   });
@@ -319,6 +323,58 @@ void main() {
       rig.pull(2000000);
       expect(rig.pull(2010000).first, 600, reason: 'no gap at the boundary');
       expect(rig.starts, hasLength(1));
+    });
+  });
+
+  group('malformed stream/start', () {
+    test('a format with a zero rate or channel count is ignored', () {
+      for (final bad in [
+        {'sample_rate': 0, 'channels': 2},
+        {'sample_rate': 48000, 'channels': 0},
+        {'sample_rate': -1, 'channels': 2},
+      ]) {
+        final rig = _Rig();
+        rig.server.sendJson('stream/start', {
+          'player': {'codec': 'pcm', 'bit_depth': 16, ...bad},
+        });
+        expect(rig.starts, isEmpty, reason: '$bad');
+        rig.chunk(2000000, 100);
+        expect(rig.pull(2000000), everyElement(0));
+      }
+    });
+
+    test('a codec the player cannot build is reported, not thrown', () {
+      final rig = _Rig();
+      final errors = <Object>[];
+      rig.player.onStreamError = errors.add;
+      rig.server.sendJson('stream/start', {
+        'player': {
+          'codec': 'flac',
+          'sample_rate': 48000,
+          'channels': 2,
+          'bit_depth': 16,
+        },
+      });
+      expect(errors, hasLength(1));
+      expect(rig.starts, isEmpty);
+      rig.chunk(2000000, 100);
+      expect(rig.pull(2000000), everyElement(0));
+    });
+
+    test('a bad codec header is reported, not thrown', () {
+      final rig = _Rig();
+      final errors = <Object>[];
+      rig.player.onStreamError = errors.add;
+      rig.server.sendJson('stream/start', {
+        'player': {
+          'codec': 'pcm',
+          'sample_rate': 48000,
+          'channels': 2,
+          'bit_depth': 16,
+          'codec_header': '!!! not base64 !!!',
+        },
+      });
+      expect(errors, hasLength(1));
     });
   });
 
