@@ -309,6 +309,21 @@ void main() {
       }
     });
 
+    test('a pair/abort without a reason string closes during an attempt', () {
+      for (final payload in <Map<String, dynamic>>[
+        {},
+        {'reason': 7},
+      ]) {
+        final f = _Fixture.pairingSession();
+        f.server.sendJson('server/activate', _pairingActivation);
+        f.server.receivedJson.clear();
+        f.server.sendJson('pair/abort', payload);
+        expect(f.closes, hasLength(1));
+        expect(f.aborted, isEmpty);
+        expect(f.sent, isEmpty);
+      }
+    });
+
     test('a second server/pair-finalize is out of sequence', () {
       final f = _Fixture.pairingSession();
       f.server.sendJson('server/activate', _pairingActivation);
@@ -485,6 +500,20 @@ void main() {
       connect(protocol, server: server);
       expect(pairing.records.last.serverId, server.serverId);
     });
+  });
+
+  test('the player forwards pairing store errors', () {
+    final player = SendspinPlayer(
+      playerName: 'P',
+      identity: testIdentity,
+      bufferSeconds: 5,
+      unpairedAccess: false,
+    );
+    addTearDown(player.dispose);
+    void handler(Object _) {}
+    player.onPairingStoreError = handler;
+    expect(player.protocol.onPairingStoreError, same(handler));
+    expect(player.onPairingStoreError, same(handler));
   });
 
   test('client/hello offers the Pairing PSK method', () {
