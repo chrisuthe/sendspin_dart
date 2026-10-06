@@ -1380,11 +1380,13 @@ void main() {
       });
     });
 
-    test('dispose drops the pending update', () {
+    test('dispose drops the current state and the pending update', () {
       withProtocol((async, p, _) {
+        sendMetadata(p, {'timestamp': startUs, 'title': 'Current'});
         sendMetadata(p, {'timestamp': startUs + 20000, 'title': 'Next'});
         p.dispose();
         expect(p.pendingMetadata, isNull);
+        expect(p.currentTrackPositionMs, isNull);
         async.elapse(ms * 50);
         expect(p.state.metadata, isNull);
       });

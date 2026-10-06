@@ -805,9 +805,7 @@ class SendspinProtocol {
   void dispose() {
     stopClockSync();
     _stopStateReporting();
-    _pendingMetadataTimer?.cancel();
-    _pendingMetadataTimer = null;
-    _pendingMetadata = null;
+    _discardMetadata();
     _stateController.close();
   }
 }
