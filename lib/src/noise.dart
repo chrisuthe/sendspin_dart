@@ -51,7 +51,13 @@ Uint8List _dh(Uint8List privateKey, Uint8List publicKey) {
         publicKey: _basePoint, type: KeyPairType.x25519),
     remotePublicKey: _publicKey(publicKey),
   );
-  return Uint8List.fromList((secret as SecretKeyData).bytes);
+  final bytes = Uint8List.fromList((secret as SecretKeyData).bytes);
+  // A low-order public key produces an all-zero output, which would put a
+  // known value into the key schedule. Noise lets implementations reject it.
+  if (bytes.every((b) => b == 0)) {
+    throw const NoiseError('all-zero DH shared secret');
+  }
+  return bytes;
 }
 
 /// The Curve25519 public key for [privateKey].

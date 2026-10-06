@@ -50,6 +50,10 @@ void main() {
       expect(frames.last[1], 0x01);
     });
 
+    test('an empty message is refused', () {
+      expect(() => fragmentMessage(Uint8List(0)), throwsArgumentError);
+    });
+
     test('a fragment message itself cannot be fragmented', () {
       expect(() => fragmentMessage(_message(1, maxTransportPlaintext + 1)),
           throwsArgumentError);
