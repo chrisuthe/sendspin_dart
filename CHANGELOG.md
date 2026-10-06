@@ -47,6 +47,40 @@ protocol. It cannot talk to pre-rc1 servers.
   `SendspinChannel`, `NoiseHandshake` / `NoiseSession`, and
   `example/sendspin_cli.dart`.
 
+### Clock-scheduled playback
+
+- **`pullSamples` changed:** `pullSamples(count, outputTimeUs: ...)`. The
+  consumer passes the local time, on the `nowUs()` clock, at which the first
+  requested sample will leave the audio port (now plus backend and DAC
+  latency). The buffer returns exactly the audio due then, so the consumer's
+  output latency is compensated instead of being ignored.
+- `SendspinBuffer` is rewritten to schedule against the local clock. It keeps
+  server timestamps and translates them through the time filter at the moment
+  of each pull, subtracting the output delay, rather than anchoring to the
+  first chunk and counting frames.
+- On startup, `stream/clear`, underrun recovery and any error above 1 ms it
+  snaps to position once: a late prefix is dropped, or silence is inserted
+  until the audio is due. The 200 ms startup threshold is gone, so there is
+  no startup warble and no fixed startup latency.
+- Steady-state correction uses a 100 µs dead band and drops or duplicates
+  whole frames (1 at 44.1/48 kHz, 2 at 96 kHz, 4 at 192 kHz), limited to 0.5%
+  of the audio in any 150 ms. Previously: 2 ms dead band, up to 4%, and a
+  500 ms re-anchor threshold.
+- Output delay is a timestamp offset, not a hold-back of buffered samples. A
+  change takes effect on the next pull; reducing it leaves extra audio
+  buffered and playback waits it out.
+- A `stream/start` on a running stream no longer flushes. Buffered chunks
+  stay, each chunk is decoded in the format in effect when it arrived, and
+  `onStreamStart` is called again from inside `pullSamples` at the sample
+  where the new format takes effect.
+- Chunks that arrive after their time has passed are dropped; a missing
+  chunk becomes silence of the same length.
+- `pullSamples` returns silence until the time filter is synchronized.
+- New on `SendspinPlayer`: `nowUs()`, `syncErrorUs`, `framesDropped`,
+  `framesInserted`, `resyncCount`, `lateChunksDropped`, and a `now` clock
+  source. Removed from `SendspinBuffer`: `startupBufferMs`, `isInUnderrun`,
+  and the fixed `sampleRate` / `channels` constructor arguments.
+
 ### Pairing
 
 - The Pairing PSK method is implemented. After a pairing `server/activate`

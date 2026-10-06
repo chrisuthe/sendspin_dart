@@ -18,7 +18,13 @@ class SendspinPlayer {
   /// The underlying protocol instance, exposed for advanced consumers.
   final SendspinProtocol protocol;
 
-  /// Called when audio streaming begins with the negotiated format.
+  /// Called with the format of the audio [pullSamples] is about to return:
+  /// when a stream starts, and again when playback reaches audio in a
+  /// different format after the server changed it on the running stream. In
+  /// the second case the call comes from inside [pullSamples], at the sample
+  /// where the change takes effect, and later pulls must be sized for the
+  /// new format. [bitDepth] is the wire format's; the samples returned are
+  /// always 16-bit.
   void Function(int sampleRate, int channels, int bitDepth)? onStreamStart;
 
   /// Called when audio streaming ends.
@@ -33,6 +39,9 @@ class SendspinPlayer {
 
   SendspinCodec? _codec;
   SendspinBuffer? _buffer;
+
+  /// The format audio chunks are currently arriving in.
+  StreamConfig? _config;
 
   void Function(int delayMs)? _userOnOutputDelayChanged;
 
@@ -58,6 +67,7 @@ class SendspinPlayer {
     int initialOutputDelayMs = 0,
     int requiredLeadTimeMs = 250,
     int minBufferMs = 250,
+    int Function()? now,
   })  : bufferSeconds = bufferSeconds,
         protocol = SendspinProtocol(
           playerName: playerName,
@@ -73,6 +83,7 @@ class SendspinPlayer {
           initialOutputDelayMs: initialOutputDelayMs,
           requiredLeadTimeMs: requiredLeadTimeMs,
           minBufferMs: minBufferMs,
+          now: now,
         ) {
     _wireProtocol();
   }
@@ -228,12 +239,43 @@ class SendspinPlayer {
   // Own methods
   // ---------------------------------------------------------------------------
 
-  /// Pulls [count] samples from the jitter buffer, or returns silence if not
-  /// streaming.
-  Int16List pullSamples(int count) {
-    if (_buffer == null) return Int16List(count);
-    return _buffer!.pullSamples(count);
+  /// The local clock [pullSamples] is given times in, in microseconds.
+  int nowUs() => protocol.nowUs();
+
+  /// Returns [count] interleaved 16-bit samples for the audio callback.
+  ///
+  /// [outputTimeUs] is the local time, on the [nowUs] clock, at which the
+  /// first of these samples will leave the device's audio port: now plus
+  /// whatever the audio backend and DAC add (queued buffers, device latency).
+  /// The buffer returns exactly the audio that is due then, so that delay is
+  /// compensated here and must not be included in the output delay.
+  ///
+  /// Returns silence when not streaming, before the clock is synchronized,
+  /// and for any part of the request no audio is due for.
+  Int16List pullSamples(int count, {required int outputTimeUs}) {
+    final buffer = _buffer;
+    if (buffer == null || !protocol.clock.isSynchronized) {
+      return Int16List(count);
+    }
+    final samples = buffer.pullSamples(count, outputTimeUs);
+    if (buffer.bufferDepthMs != protocol.state.bufferDepthMs) {
+      protocol.updatePipelineState(
+          protocol.state.copyWith(bufferDepthMs: buffer.bufferDepthMs));
+    }
+    return samples;
   }
+
+  /// The last measured playback error in microseconds: positive when audio
+  /// was running late against its schedule, negative when early.
+  int get syncErrorUs => _buffer?.syncErrorUs ?? 0;
+
+  /// Frames removed and duplicated by steady-state drift correction, one-shot
+  /// resynchronizations (the initial alignment included) and chunks dropped
+  /// for arriving late, all for the current stream.
+  int get framesDropped => _buffer?.framesDropped ?? 0;
+  int get framesInserted => _buffer?.framesInserted ?? 0;
+  int get resyncCount => _buffer?.resyncCount ?? 0;
+  int get lateChunksDropped => _buffer?.lateChunksDropped ?? 0;
 
   /// Resets for a new WebSocket connection: clears codec, buffer, and protocol
   /// timers.
@@ -243,6 +285,7 @@ class SendspinPlayer {
     _codec = null;
     _buffer?.flush();
     _buffer = null;
+    _config = null;
   }
 
   /// Cleans up codec and protocol resources.
@@ -269,9 +312,9 @@ class SendspinPlayer {
   }
 
   void _handleStreamConfig(StreamConfig config) {
-    final wasStreaming = _codec != null;
-
-    // Dispose old codec.
+    // Chunks are decoded as they arrive, so swapping the codec here means
+    // each chunk is decoded in the format that was in effect when it was
+    // received. What is already buffered stays as it is.
     _codec?.dispose();
     _codec = null;
 
@@ -289,40 +332,46 @@ class SendspinPlayer {
 
     // If codec header is present, push it through the codec (e.g. FLAC STREAMINFO).
     if (config.codecHeader != null) {
-      // codecHeader is base64-encoded.
-      // Note: dart:convert is already available via protocol.dart's transitive
-      // import, but we import it explicitly if needed.
       _codec!.decode(_base64Decode(config.codecHeader!));
     }
 
-    // Buffer management: flush on track switch, create fresh otherwise.
-    if (wasStreaming && _buffer != null) {
-      _buffer!.flush();
-    } else {
-      _buffer = SendspinBuffer(
-        sampleRate: config.sampleRate,
-        channels: config.channels,
-        startupBufferMs: 200,
-        maxBufferMs: bufferSeconds * 1000,
-      );
+    final updatesRunningStream = _buffer != null;
+    _config = config;
+    if (updatesRunningStream) {
+      // A configuration update on an active stream continues the timeline.
+      // The buffer reports the change when playback reaches the new audio.
+      return;
     }
-    _buffer!.outputDelayMs = protocol.outputDelayMs;
+
+    _buffer = SendspinBuffer(
+      serverToLocalUs: protocol.clock.computeClientTime,
+      // Room for the advertised capacity plus what a reduced output delay
+      // can leave buffered beyond it.
+      maxBufferMs: bufferSeconds * 1000 + 5000,
+    )
+      ..outputDelayMs = protocol.outputDelayMs
+      ..setOutputFormat(
+          sampleRate: config.sampleRate, channels: config.channels)
+      ..onFormatChange = (sampleRate, channels) {
+        onStreamStart?.call(sampleRate, channels, _config?.bitDepth ?? 16);
+      };
 
     onStreamStart?.call(config.sampleRate, config.channels, config.bitDepth);
   }
 
   void _handleAudioFrame(AudioFrame frame) {
-    if (_codec == null || _buffer == null) return;
+    final config = _config;
+    if (_codec == null || _buffer == null || config == null) return;
     final samples = _codec!.decode(frame.audioData);
-    // Per Sendspin spec: audio chunks carry server-clock timestamps;
-    // clients must translate to the local clock via the time-filter
-    // before scheduling playback. Pre-sync the filter is identity
-    // (offset=0, _useDrift=false), so this is a no-op until the first
-    // burst converges. After convergence drift compensation moves out
-    // of the buffer's chase loop and into the filter where it belongs.
-    final clientTimestampUs =
-        protocol.clock.computeClientTime(frame.timestampUs);
-    _buffer!.addChunk(clientTimestampUs, samples);
+    // The buffer keeps the server timestamp and translates it through the
+    // time filter when the audio is pulled, so scheduling always uses the
+    // filter's latest estimate.
+    _buffer!.addChunk(
+      frame.timestampUs,
+      samples,
+      sampleRate: config.sampleRate,
+      channels: config.channels,
+    );
     protocol.updatePipelineState(
         protocol.state.copyWith(bufferDepthMs: _buffer!.bufferDepthMs));
   }
@@ -330,6 +379,7 @@ class SendspinPlayer {
   void _handleStreamClear() {
     _buffer?.flush();
     _codec?.reset();
+    protocol.updatePipelineState(protocol.state.copyWith(bufferDepthMs: 0));
   }
 
   void _handleStreamEnd() {
@@ -338,6 +388,8 @@ class SendspinPlayer {
     _codec?.dispose();
     _codec = null;
     _buffer = null;
+    _config = null;
+    protocol.updatePipelineState(protocol.state.copyWith(bufferDepthMs: 0));
   }
 
   /// Decodes a base64 string to bytes.

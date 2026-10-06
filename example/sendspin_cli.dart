@@ -1,9 +1,16 @@
 // ABOUTME: Minimal command-line Sendspin player built on SendspinPlayer.
-// ABOUTME: Connects to a server, logs the session and discards the audio.
+// ABOUTME: Connects to a server, logs the session, and writes the audio
+// ABOUTME: as raw PCM if asked to.
 //
 // Usage: dart run example/sendspin_cli.dart ws://host:8927/sendspin
 //          [--seconds N] [--key-file PATH] [--pairing-file PATH]
 //          [--token-file PATH] [--no-unpaired] [--name NAME]
+//          [--pcm-out PATH|-] [--latency-ms N]
+//
+// With `--pcm-out -` the decoded audio goes to stdout as 16-bit little-endian
+// PCM and the log goes to stderr, e.g.
+//   dart run example/sendspin_cli.dart ws://host:8927/sendspin --pcm-out - \
+//     | aplay -f S16_LE -r 48000 -c 2
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -47,13 +54,14 @@ String? _option(List<String> args, String name) {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
 }
 
-void _log(String line) => stdout.writeln(line);
+void _log(String line) => stderr.writeln(line);
 
 Future<void> main(List<String> args) async {
   if (args.isEmpty || args.first.startsWith('--')) {
     stderr.writeln('usage: sendspin_cli.dart ws://host:port/sendspin '
         '[--seconds N] [--key-file PATH] [--pairing-file PATH] '
-        '[--token-file PATH] [--no-unpaired] [--name NAME]');
+        '[--token-file PATH] [--no-unpaired] [--name NAME] '
+        '[--pcm-out PATH|-] [--latency-ms N]');
     exit(64);
   }
   final url = args.first;
@@ -98,9 +106,6 @@ Future<void> main(List<String> args) async {
   player.onActivate = (activities, roles) =>
       _log('activate activities=$activities roles=$roles '
           'paired=${player.isPaired} server=${player.serverId}');
-  player.onStreamStart = (rate, channels, depth) =>
-      _log('stream/start ${rate}Hz ${channels}ch ${depth}bit');
-  player.onStreamStop = () => _log('stream/end');
   player.onMetadataUpdate = (m) => _log('metadata title=${m.title} '
       'artist=${m.artist} position=${player.currentTrackPositionMs}ms');
   player.onGroupUpdate =
@@ -119,27 +124,99 @@ Future<void> main(List<String> args) async {
     onError: (Object e) => finish('socket error: $e'),
   );
 
-  // Drain the buffer the way an audio callback would: 10 ms at a time.
+  // Stand in for an audio device: a steady sample clock derived from the
+  // local clock. Each tick pulls the frames that have become due and says
+  // when they leave the "port": their position on that sample clock plus a
+  // fixed pipeline latency.
+  final pcmPath = _option(args, '--pcm-out');
+  final IOSink? pcmOut = pcmPath == null
+      ? null
+      : (pcmPath == '-' ? stdout : File(pcmPath).openWrite());
+  final latencyUs = int.parse(_option(args, '--latency-ms') ?? '100') * 1000;
+
   var pulled = 0;
   var audible = 0;
-  final pump = Timer.periodic(const Duration(milliseconds: 10), (_) {
-    final rate = player.state.sampleRate;
-    final channels = player.state.channels;
+  var maxErrorUs = 0;
+  var errorSamples = 0;
+  var errorSumUs = 0;
+  var dropped = 0;
+  var inserted = 0;
+  var resyncs = 0;
+  var late = 0;
+  var lastResyncCount = 0;
+  int? deviceStartUs;
+  var devicePulledFrames = 0;
+  int? deviceRate;
+  int? deviceChannels;
+
+  void collectStats() {
+    dropped += player.framesDropped;
+    inserted += player.framesInserted;
+    resyncs += player.resyncCount;
+    late += player.lateChunksDropped;
+  }
+
+  player.onStreamStart = (rate, channels, depth) {
+    _log('stream/start ${rate}Hz ${channels}ch ${depth}bit');
+    // A new format restarts the stand-in device.
+    deviceRate = rate;
+    deviceChannels = channels;
+    deviceStartUs = null;
+    devicePulledFrames = 0;
+    lastResyncCount = 0;
+  };
+  player.onStreamStop = () {
+    collectStats();
+    _log('stream/end');
+    deviceRate = null;
+  };
+
+  final pump = Timer.periodic(const Duration(milliseconds: 5), (_) {
+    final rate = deviceRate;
+    final channels = deviceChannels;
     if (rate == null || channels == null) return;
-    final samples = player.pullSamples(rate ~/ 100 * channels);
+    final now = player.nowUs();
+    final start = deviceStartUs ??= now;
+    final dueFrames = (now - start) * rate ~/ 1000000 - devicePulledFrames;
+    if (dueFrames <= 0) return;
+    final outputTimeUs =
+        start + devicePulledFrames * 1000000 ~/ rate + latencyUs;
+    final samples =
+        player.pullSamples(dueFrames * channels, outputTimeUs: outputTimeUs);
+    // A format change reported from inside the pull restarted the device.
+    if (deviceStartUs == null) return;
+    devicePulledFrames += dueFrames;
     pulled += samples.length;
-    audible += samples.where((s) => s != 0).length;
+    final nonZero = samples.where((s) => s != 0).length;
+    audible += nonZero;
+    // Steady-state error only: a pull that resynchronized measured the
+    // error it then removed.
+    final resynced = player.resyncCount != lastResyncCount;
+    lastResyncCount = player.resyncCount;
+    if (nonZero > 0 && !resynced) {
+      final error = player.syncErrorUs.abs();
+      if (error > maxErrorUs) maxErrorUs = error;
+      errorSumUs += error;
+      errorSamples++;
+    }
+    pcmOut?.add(Uint8List.view(samples.buffer));
   });
 
   player.start();
   final why = await done.future.timeout(Duration(seconds: seconds),
       onTimeout: () => 'time limit reached');
   pump.cancel();
+  collectStats();
+  if (pcmOut != null && pcmOut != stdout) await pcmOut.close();
 
   final state = player.state;
   _log('done: $why');
   _log('summary roles=${state.activeRoles} activities=${state.activities} '
       'clock_samples=${state.clockSamples} pulled=$pulled audible=$audible');
+  _log('sync resyncs=$resyncs dropped=$dropped inserted=$inserted '
+      'late_chunks=$late max_error_us=$maxErrorUs '
+      'mean_error_us=${errorSamples == 0 ? 0 : errorSumUs ~/ errorSamples} '
+      'min_buffer_ms=${player.protocol.reportedMinBufferMs}');
   if (ws.readyState == WebSocket.open) {
     player.sendGoodbye(SendspinGoodbyeReason.shutdown);
   }
