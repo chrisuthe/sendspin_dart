@@ -7,6 +7,11 @@ void main() {
   group('ArrivalDelayTracker', () {
     const windowUs = 10 * 1000 * 1000;
 
+    /// Adds one sample at the start of window [index]. The first sample of a
+    /// window is what closes the previous one.
+    void sampleIn(ArrivalDelayTracker t, int index, int delayUs) =>
+        t.addSample(delayUs: delayUs, nowUs: index * windowUs);
+
     test('reports nothing until a full window has been observed', () {
       final t = ArrivalDelayTracker();
       t.addSample(delayUs: 12000, nowUs: 0);
@@ -18,66 +23,79 @@ void main() {
       final t = ArrivalDelayTracker();
       t.addSample(delayUs: 3000, nowUs: 0);
       t.addSample(delayUs: 14000, nowUs: 1000);
-      t.addSample(delayUs: 2000, nowUs: windowUs);
+      sampleIn(t, 1, 2000);
       expect(t.minBufferMs, 20);
     });
 
     test('clamps negative delays to zero', () {
       final t = ArrivalDelayTracker();
-      t.addSample(delayUs: -5000, nowUs: 0);
-      t.addSample(delayUs: -5000, nowUs: windowUs);
+      sampleIn(t, 0, -5000);
+      sampleIn(t, 1, -5000);
       expect(t.minBufferMs, 0);
     });
 
-    test('does not react to a spike straight away', () {
+    test('a lone outlier chunk in a busy window is not the upper tail', () {
       final t = ArrivalDelayTracker();
-      t.addSample(delayUs: 5000, nowUs: 0);
-      t.addSample(delayUs: 5000, nowUs: windowUs);
+      for (var i = 0; i < 99; i++) {
+        t.addSample(delayUs: 5000, nowUs: i);
+      }
+      t.addSample(delayUs: 90000, nowUs: 99);
+      sampleIn(t, 1, 5000);
       expect(t.minBufferMs, 10);
-
-      // One window with a 90 ms outlier, then back to normal.
-      t.addSample(delayUs: 90000, nowUs: windowUs + 1);
-      t.addSample(delayUs: 5000, nowUs: 2 * windowUs);
-      expect(t.minBufferMs, 10,
-          reason: 'a new value must repeat before it is reported');
     });
 
-    test('raises the report once the shift persists for two windows', () {
+    test('a spike confined to one window never moves the report', () {
       final t = ArrivalDelayTracker();
-      t.addSample(delayUs: 5000, nowUs: 0);
-      t.addSample(delayUs: 5000, nowUs: windowUs);
-      t.addSample(delayUs: 90000, nowUs: windowUs + 1);
-      t.addSample(delayUs: 90000, nowUs: 2 * windowUs);
+      sampleIn(t, 0, 5000);
+      sampleIn(t, 1, 90000);
       expect(t.minBufferMs, 10);
-      t.addSample(delayUs: 90000, nowUs: 3 * windowUs);
+      // The 90 ms window stays in the history for six closes and then ages
+      // out; the report must not follow it at any point.
+      for (var w = 2; w < 12; w++) {
+        sampleIn(t, w, 5000);
+        expect(t.minBufferMs, 10, reason: 'after closing window ${w - 1}');
+      }
+    });
+
+    test('raises the report once two windows show the higher delay', () {
+      final t = ArrivalDelayTracker();
+      sampleIn(t, 0, 5000);
+      sampleIn(t, 1, 90000);
+      sampleIn(t, 2, 90000);
+      expect(t.minBufferMs, 10);
+      sampleIn(t, 3, 90000);
       expect(t.minBufferMs, 90);
     });
 
-    test('lowers the report only after the tail leaves the history', () {
+    test('lowers the report once fewer than two windows still show it', () {
       final t = ArrivalDelayTracker(historyWindows: 3);
-      t.addSample(delayUs: 50000, nowUs: 0);
-      var now = windowUs;
-      t.addSample(delayUs: 5000, nowUs: now);
+      sampleIn(t, 0, 50000);
+      sampleIn(t, 1, 50000);
+      sampleIn(t, 2, 5000);
       expect(t.minBufferMs, 50);
-      // The 50 ms window stays in the 3-window history for two more closes.
-      for (var i = 0; i < 2; i++) {
-        now += windowUs;
-        t.addSample(delayUs: 5000, nowUs: now);
-        expect(t.minBufferMs, 50);
-      }
-      // It has now aged out; the lower value must persist for two windows.
-      now += windowUs;
-      t.addSample(delayUs: 5000, nowUs: now);
-      expect(t.minBufferMs, 50);
-      now += windowUs;
-      t.addSample(delayUs: 5000, nowUs: now);
+      sampleIn(t, 3, 5000);
+      expect(t.minBufferMs, 50, reason: 'history is [50, 50, 5]');
+      sampleIn(t, 4, 5000);
+      expect(t.minBufferMs, 10, reason: 'history is [50, 5, 5]');
+    });
+
+    test('a gap longer than the history discards the stale windows', () {
+      final t = ArrivalDelayTracker();
+      sampleIn(t, 0, 80000);
+      sampleIn(t, 1, 80000);
+      sampleIn(t, 2, 80000);
+      expect(t.minBufferMs, 80);
+
+      // The stream stops for far longer than the six-window history.
+      sampleIn(t, 1000, 5000);
+      sampleIn(t, 1001, 5000);
       expect(t.minBufferMs, 10);
     });
 
     test('reset forgets all samples', () {
       final t = ArrivalDelayTracker();
-      t.addSample(delayUs: 5000, nowUs: 0);
-      t.addSample(delayUs: 5000, nowUs: windowUs);
+      sampleIn(t, 0, 5000);
+      sampleIn(t, 1, 5000);
       t.reset();
       expect(t.minBufferMs, isNull);
     });

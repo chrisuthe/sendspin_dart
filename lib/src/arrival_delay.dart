@@ -9,20 +9,21 @@
 /// window long enough to include intermittent interference, and debounced so
 /// the reported value only moves on a sustained shift.
 ///
-/// Samples are grouped into windows of [windowUs]. The estimate is the largest
-/// delay seen across the last [historyWindows] windows, rounded up to a
-/// multiple of [stepMs]. [minBufferMs] follows the estimate only once the
-/// same new value has come out of two consecutive windows.
+/// Samples are grouped into windows of [windowUs], each summarised by its
+/// 95th-percentile delay so a lone late chunk does not define the tail. The
+/// last [historyWindows] summaries are kept, and [minBufferMs] is the second
+/// largest of them rounded up to a multiple of [stepMs]: a delay level has to
+/// show up in two windows before it is reported, and stops being reported
+/// once fewer than two windows in the history still show it.
 class ArrivalDelayTracker {
   final int windowUs;
   final int historyWindows;
   final int stepMs;
 
   final List<int> _history = [];
+  final List<int> _window = [];
   int? _windowStartUs;
-  int _windowMaxUs = 0;
   int? _reportedMs;
-  int? _candidateMs;
 
   ArrivalDelayTracker({
     this.windowUs = 10 * 1000 * 1000,
@@ -39,40 +40,39 @@ class ArrivalDelayTracker {
     final start = _windowStartUs;
     if (start == null) {
       _windowStartUs = nowUs;
+    } else if (nowUs - start >= windowUs * historyWindows) {
+      // No samples for longer than the history covers (the stream stopped):
+      // what was measured before the gap no longer describes the network.
+      _history.clear();
+      _window.clear();
+      _windowStartUs = nowUs;
     } else if (nowUs - start >= windowUs) {
       _closeWindow();
       _windowStartUs = nowUs;
-      _windowMaxUs = 0;
     }
-    if (delayUs > _windowMaxUs) _windowMaxUs = delayUs;
+    _window.add(delayUs < 0 ? 0 : delayUs);
   }
 
   void _closeWindow() {
-    _history.add(_windowMaxUs);
+    _window.sort();
+    // Nearest-rank 95th percentile.
+    final rank = (_window.length * 95 + 99) ~/ 100;
+    _history.add(_window[rank - 1]);
+    _window.clear();
     if (_history.length > historyWindows) _history.removeAt(0);
 
-    final tailUs = _history.reduce((a, b) => a > b ? a : b);
+    final sorted = List<int>.of(_history)..sort();
+    final tailUs =
+        sorted.length == 1 ? sorted.single : sorted[sorted.length - 2];
     final stepUs = stepMs * 1000;
-    final estimateMs = (tailUs + stepUs - 1) ~/ stepUs * stepMs;
-
-    if (_reportedMs == null) {
-      _reportedMs = estimateMs;
-    } else if (estimateMs == _reportedMs) {
-      _candidateMs = null;
-    } else if (estimateMs == _candidateMs) {
-      _reportedMs = estimateMs;
-      _candidateMs = null;
-    } else {
-      _candidateMs = estimateMs;
-    }
+    _reportedMs = (tailUs + stepUs - 1) ~/ stepUs * stepMs;
   }
 
   /// Forgets all samples, e.g. when the connection is replaced.
   void reset() {
     _history.clear();
+    _window.clear();
     _windowStartUs = null;
-    _windowMaxUs = 0;
     _reportedMs = null;
-    _candidateMs = null;
   }
 }
