@@ -60,6 +60,42 @@ void activate(
           roles ?? _protocolOf(target).roles.map((r) => r.wireValue).toList(),
     });
 
+const List<String> _allControllerCommands = [
+  'play',
+  'pause',
+  'stop',
+  'next',
+  'previous',
+  'volume',
+  'mute',
+  'repeat_off',
+  'repeat_one',
+  'repeat_all',
+  'shuffle',
+  'unshuffle',
+  'switch',
+  'seek',
+  'seek_relative',
+];
+
+/// Sends a controller state from the server that lists [commands] as
+/// supported (default: all of them), so the client may send them.
+void allowControllerCommands(
+  Object target, [
+  List<String> commands = _allControllerCommands,
+  int? seekMaxMs,
+]) =>
+    serverOf(target).sendJson('server/state', {
+      'controller': {
+        'supported_commands': commands,
+        'volume': 50,
+        'muted': false,
+        'repeat': 'off',
+        'shuffle': false,
+        if (seekMaxMs != null) 'seek_max_ms': seekMaxMs,
+      },
+    });
+
 /// The [FakeServer] [target] is connected to, connecting it first if needed.
 FakeServer serverOf(Object target) =>
     _servers[_protocolOf(target)] ?? connect(target);

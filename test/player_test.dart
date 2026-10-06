@@ -322,6 +322,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerCommand('pause');
 
       expect(sent, hasLength(1));
@@ -344,6 +345,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerVolume(60);
 
       expect(sent, hasLength(1));
@@ -366,6 +368,7 @@ void main() {
       final sent = <String>[];
       captureSent(p, sent);
 
+      allowControllerCommands(p);
       p.sendControllerMute(false);
 
       expect(sent, hasLength(1));
