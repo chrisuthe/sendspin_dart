@@ -98,6 +98,9 @@ class SendspinPlayer {
   set onArtworkFrame(void Function(ArtworkFrame frame)? cb) =>
       protocol.onArtworkFrame = cb;
 
+  SendspinMetadata? get pendingMetadata => protocol.pendingMetadata;
+  int? get currentTrackPositionMs => protocol.currentTrackPositionMs;
+
   int get staticDelayMs => protocol.staticDelayMs;
 
   void Function(int delayMs)? get onStaticDelayChanged =>
