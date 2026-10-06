@@ -31,6 +31,9 @@ class FramingError implements Exception {
 /// binary messages to send. A message that fits is returned as is; a larger
 /// one becomes `[1][flags][orig_type][data]` then `[1][flags][data]`...
 List<Uint8List> fragmentMessage(Uint8List message) {
+  if (message.isEmpty) {
+    throw ArgumentError('A binary message needs at least its ID byte');
+  }
   if (message.length <= maxTransportPlaintext) return [message];
   final origType = message[0];
   if (origType == messageIdFragment) {

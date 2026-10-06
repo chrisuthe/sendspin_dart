@@ -109,6 +109,14 @@ void main() {
           throwsA(isA<NoiseError>()));
     });
 
+    test('a low-order ephemeral key is rejected at the DH step', () {
+      // An all-zero public key yields an all-zero shared secret.
+      expect(
+          () => _responder(v).readMessage1(Uint8List(80)),
+          throwsA(isA<NoiseError>()
+              .having((e) => e.message, 'message', contains('shared secret'))));
+    });
+
     test('a truncated message 1 is rejected', () {
       expect(() => _responder(v).readMessage1(Uint8List(31)),
           throwsA(isA<NoiseError>()));
