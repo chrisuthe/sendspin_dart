@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'support/connected.dart';
 import 'test_identity.dart';
 
 /// Helper: builds a stream/start JSON message.
@@ -98,10 +99,11 @@ void main() {
       player = SendspinPlayer(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
+        additionalRoles: const {SendspinRole.metadata, SendspinRole.controller},
       );
       // Swallow outgoing text messages.
-      player.onSendText = (_) {};
     });
 
     tearDown(() {
@@ -117,7 +119,7 @@ void main() {
       final states = <SendspinConnectionState>[];
       player.stateStream.listen((s) => states.add(s.connectionState));
 
-      player.handleTextMessage(_serverHello());
+      serverSends(player, _serverHello());
       await Future.delayed(Duration.zero);
 
       expect(states, contains(SendspinConnectionState.syncing));
@@ -134,12 +136,14 @@ void main() {
         receivedBitDepth = bd;
       };
 
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(
-        sampleRate: 44100,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(player, _serverHello());
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 44100,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       expect(receivedSampleRate, 44100);
       expect(receivedChannels, 2);
@@ -148,12 +152,14 @@ void main() {
 
     test('decodes binary frames and makes samples available via pullSamples',
         () {
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(player, _serverHello());
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       // Send enough audio to exceed the 200ms startup buffer.
       // 48000 Hz * 2 channels * 0.25 seconds = 24000 samples.
@@ -161,7 +167,7 @@ void main() {
       for (int i = 0; i < pcm.length; i++) {
         pcm[i] = 1000; // non-zero so we can detect it
       }
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Pull some samples — should be non-silent.
       final pulled = player.pullSamples(960);
@@ -179,9 +185,9 @@ void main() {
       bool stopCalled = false;
       player.onStreamStop = () => stopCalled = true;
 
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart());
-      player.handleTextMessage(_streamEnd());
+      serverSends(player, _serverHello());
+      serverSends(player, _streamStart());
+      serverSends(player, _streamEnd());
 
       expect(stopCalled, isTrue);
       // After stream/end, pullSamples should return silence.
@@ -190,18 +196,18 @@ void main() {
     });
 
     test('stream/clear flushes buffer and resets codec', () {
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart());
+      serverSends(player, _serverHello());
+      serverSends(player, _streamStart());
 
       // Add some audio data.
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) {
         pcm[i] = 500;
       }
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Clear the stream.
-      player.handleTextMessage(_streamClear());
+      serverSends(player, _streamClear());
 
       // Buffer should be flushed — pull returns silence until startup met again.
       final samples = player.pullSamples(960);
@@ -213,18 +219,18 @@ void main() {
       final customPlayer = SendspinPlayer(
         playerName: 'Custom',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         codecFactory: (codec, bitDepth, channels, sampleRate) => fakeCodec,
       );
-      customPlayer.onSendText = (_) {};
 
-      customPlayer.handleTextMessage(_serverHello());
-      customPlayer.handleTextMessage(_streamStart());
+      serverSends(customPlayer, _serverHello());
+      serverSends(customPlayer, _streamStart());
 
       // Send a binary frame.
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) pcm[i] = 42;
-      customPlayer.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(customPlayer, _binaryFrame(1000000, pcm));
 
       expect(fakeCodec.decoded, isTrue);
       customPlayer.dispose();
@@ -240,26 +246,28 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], testIdentity.clientId);
+      expect(payload.containsKey('client_id'), isFalse);
       expect(payload['name'], 'Test Player');
     });
 
     test('set_static_delay before stream/start is honored on fresh buffer', () {
-      player.handleTextMessage(_serverHello());
+      serverSends(player, _serverHello());
       // Static delay of 500ms: at 48kHz stereo = 48000 samples held back.
-      player.handleTextMessage(_setStaticDelay(500));
+      serverSends(player, _setStaticDelay(500));
       expect(player.protocol.staticDelayMs, 500);
 
-      player.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       // Push 250ms of audio (24000 samples) — below the 500ms delay.
       final smallPcm = Int16List(24000);
       for (int i = 0; i < smallPcm.length; i++) smallPcm[i] = 1234;
-      player.handleBinaryMessage(_binaryFrame(1000000, smallPcm));
+      serverSendsBinary(player, _binaryFrame(1000000, smallPcm));
 
       // Should be silence — static delay holds back samples.
       final pulled = player.pullSamples(960);
@@ -268,7 +276,7 @@ void main() {
       // Push another 400ms (38400 samples). Total 62400 samples > 48000.
       final morePcm = Int16List(38400);
       for (int i = 0; i < morePcm.length; i++) morePcm[i] = 1234;
-      player.handleBinaryMessage(_binaryFrame(2000000, morePcm));
+      serverSendsBinary(player, _binaryFrame(2000000, morePcm));
 
       // Now static delay threshold exceeded — should yield non-silent audio.
       final pulled2 = player.pullSamples(960);
@@ -276,24 +284,26 @@ void main() {
     });
 
     test('set_static_delay mid-stream applies to existing buffer', () {
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(player, _serverHello());
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       // Push 250ms of audio — exceeds 200ms startup.
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) pcm[i] = 1234;
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Baseline: without delay, pullSamples yields audio.
       final before = player.pullSamples(960);
       expect(before.any((s) => s != 0), isTrue);
 
       // Apply a 1000ms static delay mid-stream. 48000 samples/ch = 96000 needed.
-      player.handleTextMessage(_setStaticDelay(1000));
+      serverSends(player, _setStaticDelay(1000));
 
       // Buffer now below the delay threshold — should return silence.
       final after = player.pullSamples(960);
@@ -304,10 +314,10 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: 800,
       );
-      p.onSendText = (_) {};
       expect(p.staticDelayMs, 800);
       p.dispose();
     });
@@ -316,22 +326,24 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: 500,
       );
-      p.onSendText = (_) {};
 
-      p.handleTextMessage(_serverHello());
-      p.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(p, _serverHello());
+      serverSends(
+          p,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       // 250ms of audio (24000 samples) — below the 500ms static delay.
       final smallPcm = Int16List(24000);
       for (int i = 0; i < smallPcm.length; i++) smallPcm[i] = 1234;
-      p.handleBinaryMessage(_binaryFrame(1000000, smallPcm));
+      serverSendsBinary(p, _binaryFrame(1000000, smallPcm));
 
       final pulled = p.pullSamples(960);
       expect(pulled.every((s) => s == 0), isTrue);
@@ -339,7 +351,7 @@ void main() {
       // Push more to exceed the 500ms (48000 samples) threshold.
       final morePcm = Int16List(38400);
       for (int i = 0; i < morePcm.length; i++) morePcm[i] = 1234;
-      p.handleBinaryMessage(_binaryFrame(2000000, morePcm));
+      serverSendsBinary(p, _binaryFrame(2000000, morePcm));
 
       final pulled2 = p.pullSamples(960);
       expect(pulled2.any((s) => s != 0), isTrue);
@@ -353,24 +365,26 @@ void main() {
       int? cbDelay;
       player.onStaticDelayChanged = (d) => cbDelay = d;
 
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(player, _serverHello());
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       // Push 250ms of audio — exceeds 200ms startup.
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) pcm[i] = 1234;
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Baseline yields audio.
       final before = player.pullSamples(960);
       expect(before.any((s) => s != 0), isTrue);
 
       // Server commands a 1000ms delay — 96000 samples needed.
-      player.handleTextMessage(_setStaticDelay(1000));
+      serverSends(player, _setStaticDelay(1000));
 
       // User callback fired.
       expect(cbDelay, 1000);
@@ -381,18 +395,20 @@ void main() {
 
     test('underrun triggers state=error via periodic poll', () async {
       final sent = <String>[];
-      player.onSendText = sent.add;
+      captureSent(player, sent);
 
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(
-        sampleRate: 48000,
-        channels: 2,
-        bitDepth: 16,
-      ));
+      serverSends(player, _serverHello());
+      serverSends(
+          player,
+          _streamStart(
+            sampleRate: 48000,
+            channels: 2,
+            bitDepth: 16,
+          ));
 
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) pcm[i] = 1000;
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Drain the buffer so the next pull underruns.
       for (int i = 0; i < 40; i++) {
@@ -418,7 +434,7 @@ void main() {
 
     test('sendGoodbye dispatches via wired onSendText', () {
       final sent = <String>[];
-      player.onSendText = sent.add;
+      captureSent(player, sent);
       player.sendGoodbye(SendspinGoodbyeReason.userRequest);
       expect(sent, hasLength(1));
       expect(sent.first, contains('"reason":"user_request"'));
@@ -427,18 +443,18 @@ void main() {
     test(
         'track switch (second stream/start while streaming) flushes existing buffer',
         () {
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart(sampleRate: 48000));
+      serverSends(player, _serverHello());
+      serverSends(player, _streamStart(sampleRate: 48000));
 
       // Add audio to the first stream.
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) pcm[i] = 999;
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       // Second stream/start (track switch).
       int startCallCount = 0;
       player.onStreamStart = (_, __, ___) => startCallCount++;
-      player.handleTextMessage(_streamStart(sampleRate: 44100));
+      serverSends(player, _streamStart(sampleRate: 44100));
 
       expect(startCallCount, 1);
 
@@ -451,12 +467,14 @@ void main() {
         () {
       SendspinMetadata? received;
       player.onMetadataUpdate = (m) => received = m;
-      player.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'timestamp': 0, 'title': 'Song', 'artist': 'A'},
-        },
-      }));
+      serverSends(
+          player,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'metadata': {'timestamp': 0, 'title': 'Song', 'artist': 'A'},
+            },
+          }));
       expect(received, isNotNull);
       expect(received!.title, 'Song');
       expect(received!.artist, 'A');
@@ -468,16 +486,18 @@ void main() {
         () {
       SendspinControllerInfo? received;
       player.onControllerUpdate = (c) => received = c;
-      player.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'controller': {
-            'supported_commands': ['play'],
-            'volume': 30,
-            'muted': false,
-          },
-        },
-      }));
+      serverSends(
+          player,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'controller': {
+                'supported_commands': ['play'],
+                'volume': 30,
+                'muted': false,
+              },
+            },
+          }));
       expect(received, isNotNull);
       expect(received!.volume, 30);
       expect(player.state.controller!.supportedCommands, ['play']);
@@ -487,14 +507,16 @@ void main() {
       SendspinGroupState? received;
       player.onGroupUpdate = (g) => received = g;
 
-      player.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {
-          'playback_state': 'playing',
-          'group_id': 'g1',
-          'group_name': 'Kitchen',
-        },
-      }));
+      serverSends(
+          player,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {
+              'playback_state': 'playing',
+              'group_id': 'g1',
+              'group_name': 'Kitchen',
+            },
+          }));
 
       expect(received, isNotNull);
       expect(received!.playbackState, SendspinGroupPlaybackState.playing);
@@ -506,10 +528,10 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller, SendspinRole.metadata},
       );
-      p.onSendText = (_) {};
       expect(
           p.protocol.roles,
           containsAll([
@@ -524,10 +546,10 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
-      p.onSendText = (_) {};
       expect(p.protocol.roles, contains(SendspinRole.player));
       p.dispose();
     });
@@ -536,6 +558,7 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -547,12 +570,11 @@ void main() {
           ),
         ],
       );
-      p.onSendText = (_) {};
       expect(p.protocol.roles, contains(SendspinRole.artwork));
 
       final hello = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
       final payload = hello['payload'] as Map<String, dynamic>;
-      expect(payload.containsKey('artwork@v1_support'), isTrue);
+      expect(payload['supported_roles'], contains('artwork@v1'));
       p.dispose();
     });
 
@@ -560,11 +582,12 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerCommand('pause');
 
@@ -581,11 +604,12 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerVolume(60);
 
@@ -602,11 +626,12 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerMute(false);
 
@@ -623,6 +648,7 @@ void main() {
       final p = SendspinPlayer(
         playerName: 'Full',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -634,7 +660,6 @@ void main() {
           ),
         ],
       );
-      p.onSendText = (_) {};
 
       ArtworkFrame? received;
       p.onArtworkFrame = (f) => received = f;
@@ -645,7 +670,7 @@ void main() {
       frame[9] = 0xFF;
       frame[10] = 0xD8;
       frame[11] = 0xFF;
-      p.handleBinaryMessage(frame);
+      serverSendsBinary(p, frame);
 
       expect(received, isNotNull);
       expect(received!.channel, 0);
@@ -660,15 +685,15 @@ void main() {
       // applies a sample, so the translation wiring is a no-op. This is
       // a smoke test of the new code path, not a translation-correctness
       // test (correctness is verified in clock_test.dart).
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart());
+      serverSends(player, _serverHello());
+      serverSends(player, _streamStart());
       expect(player.protocol.clock.computeClientTime(123456789), 123456789);
 
       final pcm = Int16List(24000);
       for (int i = 0; i < pcm.length; i++) {
         pcm[i] = 1234;
       }
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
 
       final pulled = player.pullSamples(960);
       expect(pulled.any((s) => s != 0), isTrue);
@@ -686,8 +711,8 @@ void main() {
       // would land in the SAME (server-time) domain as the first and no
       // re-anchor would fire. So depth after the second pull
       // distinguishes the two code paths.
-      player.handleTextMessage(_serverHello());
-      player.handleTextMessage(_streamStart());
+      serverSends(player, _serverHello());
+      serverSends(player, _streamStart());
 
       final pcm = Int16List(24000); // 250 ms @ 48k stereo
       for (int i = 0; i < pcm.length; i++) {
@@ -695,7 +720,7 @@ void main() {
       }
 
       // Step 1: anchor with identity translation (clock uninitialised).
-      player.handleBinaryMessage(_binaryFrame(1000000, pcm));
+      serverSendsBinary(player, _binaryFrame(1000000, pcm));
       // Pull once to anchor and start producing audio.
       player.pullSamples(960);
 
@@ -714,7 +739,7 @@ void main() {
       // late-chunk drop OR a re-anchor flush — either way, depth does
       // NOT continue to grow as it would in the no-translation case.
       final depthBeforeSecond = player.protocol.state.bufferDepthMs;
-      player.handleBinaryMessage(_binaryFrame(1500000, pcm));
+      serverSendsBinary(player, _binaryFrame(1500000, pcm));
       // Either: (a) chunk dropped at addChunk, depth unchanged;
       // (b) chunk inserted, next pull sees huge sync error, re-anchor
       // flushes the buffer to depth 0.

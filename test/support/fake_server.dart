@@ -40,6 +40,9 @@ class FakeServer {
   /// Every decrypted JSON message the client sent, in order.
   final List<Map<String, dynamic>> receivedJson = [];
 
+  /// Called with each decrypted JSON message as it arrives.
+  void Function(Map<String, dynamic> json)? onJson;
+
   /// Every decrypted non-JSON binary message the client sent.
   final List<Uint8List> receivedBinary = [];
 
@@ -135,6 +138,7 @@ class FakeServer {
       return;
     }
     receivedJson.add(json);
+    onJson?.call(json);
   }
 
   /// Encrypts and sends one binary message (ID byte followed by payload),

@@ -152,6 +152,10 @@ class SendspinChannel {
     _timeout = Timer(handshakeTimeout, () => _fail('handshake timeout'));
   }
 
+  /// Ends the connection: [onClose] fires and all further input and output is
+  /// ignored. Used once the client has said goodbye.
+  void close(String reason) => _fail(reason);
+
   /// Closes without sending anything further.
   void _fail(String reason) {
     if (_phase == _Phase.closed) return;

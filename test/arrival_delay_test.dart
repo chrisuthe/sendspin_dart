@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'support/connected.dart';
 import 'test_identity.dart';
 
 void main() {
@@ -128,6 +129,7 @@ void main() {
       protocol = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         now: () => now,
       );
@@ -142,7 +144,7 @@ void main() {
 
       // Sent at server 6.0 s (= client 5.0 s), arrives at client 5.007 s.
       now = 5007000;
-      protocol.handleBinaryMessage(chunk(6500000, 500000));
+      serverSendsBinary(protocol, chunk(6500000, 500000));
 
       expect(delays, [7000]);
     });
@@ -151,7 +153,7 @@ void main() {
       final delays = <int>[];
       protocol.onArrivalDelay = delays.add;
       now = 5007000;
-      protocol.handleBinaryMessage(chunk(6500000, 500000));
+      serverSendsBinary(protocol, chunk(6500000, 500000));
       expect(delays, isEmpty);
     });
 
@@ -160,8 +162,8 @@ void main() {
       final delays = <int>[];
       protocol.onArrivalDelay = delays.add;
       now = 5007000;
-      protocol.handleBinaryMessage(chunk(6500000, 0));
-      protocol.handleBinaryMessage(chunk(6500000, 0xFFFFFFFF));
+      serverSendsBinary(protocol, chunk(6500000, 0));
+      serverSendsBinary(protocol, chunk(6500000, 0xFFFFFFFF));
       expect(delays, isEmpty);
     });
 
@@ -169,9 +171,9 @@ void main() {
       synchronize();
       expect(protocol.measuredMinBufferMs, isNull);
       now = 5007000;
-      protocol.handleBinaryMessage(chunk(6500000, 500000));
+      serverSendsBinary(protocol, chunk(6500000, 500000));
       now = 15007000;
-      protocol.handleBinaryMessage(chunk(16500000, 500000));
+      serverSendsBinary(protocol, chunk(16500000, 500000));
       expect(protocol.measuredMinBufferMs, 10);
     });
   });

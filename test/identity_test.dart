@@ -152,20 +152,36 @@ void main() {
     });
   });
 
-  group('client/hello identity', () {
-    test('client_id is the identity public key', () {
+  group('protocol identity', () {
+    test('clientId is the identity public key', () {
       final identity = SendspinIdentity.fromPrivateKey(alicePrivate);
       final protocol = SendspinProtocol(
         playerName: 'P',
         identity: identity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       addTearDown(protocol.dispose);
 
-      expect(protocol.clientId, identity.clientId);
-      final hello =
-          jsonDecode(protocol.buildClientHello()) as Map<String, dynamic>;
-      expect((hello['payload'] as Map)['client_id'],
+      expect(protocol.clientId, 'hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo');
+    });
+
+    test('client_id is sent in client/init', () {
+      final identity = SendspinIdentity.fromPrivateKey(alicePrivate);
+      final protocol = SendspinProtocol(
+        playerName: 'P',
+        identity: identity,
+        unpairedAccess: true,
+        bufferSeconds: 5,
+      );
+      addTearDown(protocol.dispose);
+      final sent = <String>[];
+      protocol.onSendText = sent.add;
+      protocol.start();
+
+      final init = jsonDecode(sent.single) as Map<String, dynamic>;
+      expect(init['type'], 'client/init');
+      expect((init['payload'] as Map)['client_id'],
           'hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo');
     });
   });

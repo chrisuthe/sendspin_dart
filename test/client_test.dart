@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'support/connected.dart';
 import 'test_identity.dart';
 
 void main() {
@@ -12,6 +13,7 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       expect(client.state.connectionState, SendspinConnectionState.disabled);
@@ -22,23 +24,17 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final states = <SendspinConnectionState>[];
       client.stateStream.listen((s) => states.add(s.connectionState));
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {
-          'server_id': 'server-1',
-          'name': 'Music Assistant',
-          'active_roles': ['player@v1'],
-        },
-      }));
+      connect(client);
 
       await Future.delayed(Duration.zero);
       expect(states, contains(SendspinConnectionState.syncing));
-      expect(client.state.serverName, 'Music Assistant');
+      expect(client.state.serverName, 'TestServer');
       client.dispose();
     });
 
@@ -46,27 +42,32 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {
-          'server_id': 'server-1',
-          'name': 'MA',
-          'active_roles': ['player@v1'],
-        },
-      }));
-      client.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'audio_format': {
-            'codec': 'pcm',
-            'channels': 2,
-            'sample_rate': 48000,
-            'bit_depth': 16,
-          },
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/hello',
+            'payload': {
+              'server_id': 'server-1',
+              'name': 'MA',
+              'active_roles': ['player@v1'],
+            },
+          }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
       await Future.delayed(Duration.zero);
       expect(client.state.codec, 'pcm');
       expect(client.state.sampleRate, 48000);
@@ -78,14 +79,17 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'volume', 'volume': 50},
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'volume', 'volume': 50},
+            },
+          }));
       await Future.delayed(Duration.zero);
       expect(client.state.volume, 0.5);
       client.dispose();
@@ -95,14 +99,17 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'mute', 'mute': true},
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'mute', 'mute': true},
+            },
+          }));
       await Future.delayed(Duration.zero);
       expect(client.state.muted, true);
       client.dispose();
@@ -112,6 +119,7 @@ void main() {
       final client = SendspinClient(
         playerName: 'Kitchen Display',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         deviceInfo: const DeviceInfo(
           productName: 'MyApp',
@@ -123,9 +131,8 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], testIdentity.clientId);
+      expect(payload.containsKey('client_id'), isFalse);
       expect(payload['name'], 'Kitchen Display');
-      expect(payload['version'], 1);
       expect(payload['supported_roles'], contains('player@v1'));
       final deviceInfo = payload['device_info'] as Map<String, dynamic>;
       expect(deviceInfo['product_name'], 'MyApp');
@@ -138,17 +145,20 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];
-      client.onSendText = sentMessages.add;
+      captureSent(client, sentMessages);
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'volume', 'volume': 75},
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'volume', 'volume': 75},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(sentMessages, hasLength(1));
@@ -163,17 +173,20 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];
-      client.onSendText = sentMessages.add;
+      captureSent(client, sentMessages);
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'mute', 'mute': true},
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'mute', 'mute': true},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(sentMessages, hasLength(1));
@@ -188,6 +201,7 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final state =
@@ -201,33 +215,40 @@ void main() {
       final client = SendspinClient(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final sentMessages = <String>[];
-      client.onSendText = sentMessages.add;
+      captureSent(client, sentMessages);
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA'},
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'server/hello',
+            'payload': {'name': 'MA'},
+          }));
       sentMessages.clear();
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'audio_format': {
-            'codec': 'pcm',
-            'channels': 2,
-            'sample_rate': 48000,
-            'bit_depth': 16,
-          },
-        },
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
 
-      client.handleTextMessage(jsonEncode({
-        'type': 'stream/end',
-        'payload': {},
-      }));
+      serverSends(
+          client,
+          jsonEncode({
+            'type': 'stream/end',
+            'payload': {},
+          }));
 
       client.dispose();
     });
