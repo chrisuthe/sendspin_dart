@@ -1,11 +1,12 @@
 // ABOUTME: The client's static Curve25519 identity and its storage interface.
 // ABOUTME: The public key is the client_id and the Noise static key.
-import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:cryptography/dart.dart';
+
+import 'encoding.dart';
 
 /// Persists the client's static private key across restarts.
 ///
@@ -106,7 +107,7 @@ class SendspinIdentity {
   Uint8List get publicKey => Uint8List.fromList(_publicKey);
 
   /// The `client_id`: the public key as unpadded base64url (43 characters).
-  String get clientId => base64Url.encode(_publicKey).replaceAll('=', '');
+  String get clientId => base64UrlNoPad(_publicKey);
 
   static Uint8List _derivePublicKey(Uint8List privateKey) {
     // The public key is the scalar multiplication of the base point.
