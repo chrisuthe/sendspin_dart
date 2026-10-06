@@ -3,476 +3,450 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+const _rate = 48000;
+const _channels = 2;
+
+/// 10 ms of stereo audio at 48 kHz.
+const _pullFrames = 480;
+const _pullUs = 10000;
+
+/// A chunk of [frames] stereo frames whose samples identify their position:
+/// the left sample of frame `i` is `first + i`, the right one its negative.
+Int16List _ramp(int first, int frames, {int channels = _channels}) {
+  final samples = Int16List(frames * channels);
+  for (var i = 0; i < frames; i++) {
+    samples[i * channels] = first + i;
+    if (channels > 1) samples[i * channels + 1] = -(first + i);
+  }
+  return samples;
+}
+
+/// The left-channel value of each output frame.
+List<int> _left(Int16List out, {int channels = _channels}) =>
+    [for (var i = 0; i < out.length; i += channels) out[i]];
+
+SendspinBuffer _buffer({int Function(int)? serverToLocalUs}) => SendspinBuffer(
+      serverToLocalUs: serverToLocalUs ?? (t) => t,
+      maxBufferMs: 10000,
+    );
+
+void _add(SendspinBuffer b, int timestampUs, Int16List samples,
+        {int sampleRate = _rate, int channels = _channels}) =>
+    b.addChunk(timestampUs, samples,
+        sampleRate: sampleRate, channels: channels);
+
+/// Adds [seconds] of contiguous 10 ms chunks starting at [startUs]; frame `n`
+/// of the stream carries the value `1 + n` (wrapping within int16).
+void _addStream(SendspinBuffer b, int startUs, {double seconds = 1}) {
+  final chunks = (seconds * 100).round();
+  for (var c = 0; c < chunks; c++) {
+    final samples = Int16List(_pullFrames * _channels);
+    for (var i = 0; i < _pullFrames; i++) {
+      final v = ((1 + c * _pullFrames + i) % 30000) + 1;
+      samples[i * 2] = v;
+      samples[i * 2 + 1] = -v;
+    }
+    _add(b, startUs + c * _pullUs, samples);
+  }
+}
+
 void main() {
-  group('SendspinBuffer', () {
-    test('buffers chunks and retrieves in timestamp order', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(2000, Int16List.fromList([5, 6, 7, 8]));
-      buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
-      buffer.addChunk(3000, Int16List.fromList([9, 10, 11, 12]));
-      final samples = buffer.pullSamples(12);
-      expect(samples, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  group('scheduling against the local clock', () {
+    test('returns silence when nothing is buffered', () {
+      final b = _buffer();
+      expect(b.pullSamples(960, 0), everyElement(0));
     });
 
-    test('returns silence on underrun', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      final samples = buffer.pullSamples(4);
-      expect(samples, [0, 0, 0, 0]);
+    test('plays a chunk at the local time of its timestamp', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      final out = b.pullSamples(_pullFrames * 2, 1000000);
+      expect(_left(out), List.generate(_pullFrames, (i) => 100 + i));
+      expect(out[1], -100, reason: 'channels stay interleaved');
     });
 
-    test('flush clears all buffered data', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
-      buffer.flush();
-      final samples = buffer.pullSamples(4);
-      expect(samples, [0, 0, 0, 0]);
+    test('holds a chunk whose time has not come', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      expect(b.pullSamples(_pullFrames * 2, 500000), everyElement(0));
+      expect(b.bufferDepthMs, 10, reason: 'nothing was consumed');
     });
 
-    test('startup buffering holds data until threshold met', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 100,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(100, 1)));
-      final samples = buffer.pullSamples(100);
-      expect(samples, Int16List(100)); // silence — startup not met
+    test('starts mid-pull with silence in front when early', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      // The pull begins 5 ms (240 frames) before the chunk is due.
+      final left = _left(b.pullSamples(_pullFrames * 2, 995000));
+      expect(left.sublist(0, 240), everyElement(0));
+      expect(left.sublist(240), List.generate(240, (i) => 100 + i));
     });
 
-    test('reports buffer depth in milliseconds', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000,
-          Int16List.fromList(List.filled(96000, 1))); // 1000ms at 48kHz stereo
-      expect(buffer.bufferDepthMs, 1000);
+    test('drops a leading prefix when late', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      // The pull begins 5 ms after the chunk was due.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1005000));
+      expect(left.sublist(0, 240), List.generate(240, (i) => 340 + i));
+      expect(left.sublist(240), everyElement(0), reason: 'ran out of audio');
     });
 
-    test('drops oldest chunks when max buffer exceeded', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 10,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1))); // 10ms
-      buffer.addChunk(2000, Int16List.fromList(List.filled(960, 2))); // 10ms
-      buffer.addChunk(3000, Int16List.fromList(List.filled(960, 3))); // 10ms
-      expect(buffer.bufferDepthMs, lessThanOrEqualTo(20));
+    test('drops whole chunks that are entirely in the past', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      _add(b, 1010000, _ramp(1000, _pullFrames));
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
+      expect(left.first, 1000);
     });
 
-    test('flush resets startup buffering requirement', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 100,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(
-          1000, Int16List.fromList(List.filled(96000, 1))); // exceed startup
-      final samples1 = buffer.pullSamples(10);
-      expect(samples1.any((s) => s != 0), true);
-      buffer.flush();
-      buffer.addChunk(2000, Int16List.fromList(List.filled(100, 1)));
-      final samples2 = buffer.pullSamples(100);
-      expect(samples2, Int16List(100)); // startup not met again
+    test('translates timestamps through the supplied clock mapping', () {
+      // server = local + 2 s
+      final b = _buffer(serverToLocalUs: (t) => t - 2000000);
+      _add(b, 3000000, _ramp(100, _pullFrames));
+      expect(_left(b.pullSamples(_pullFrames * 2, 1000000)).first, 100);
     });
 
-    test('returns Int16List from pullSamples', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4]));
-      final samples = buffer.pullSamples(4);
-      expect(samples, isA<Int16List>());
+    test('plays contiguous chunks back to back without corrections', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      final played = <int>[];
+      for (var p = 0; p < 100; p++) {
+        played.addAll(
+            _left(b.pullSamples(_pullFrames * 2, 1000000 + p * _pullUs)));
+      }
+      expect(played, List.generate(48000, (i) => ((1 + i) % 30000) + 1));
+      expect(b.framesDropped, 0);
+      expect(b.framesInserted, 0);
+      expect(b.resyncCount, 1, reason: 'only the startup snap');
     });
 
-    test('isInUnderrun false before any real audio produced', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.pullSamples(4);
-      expect(buffer.isInUnderrun, isFalse);
+    test('chunks may arrive out of order', () {
+      final b = _buffer();
+      _add(b, 1010000, _ramp(1000, _pullFrames));
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      expect(_left(b.pullSamples(_pullFrames * 2, 1000000)).first, 100);
+      expect(_left(b.pullSamples(_pullFrames * 2, 1010000)).first, 1000);
     });
 
-    test('isInUnderrun false after a successful real-audio pull', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isFalse);
+    test('a duplicate timestamp is ignored', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      _add(b, 1000000, _ramp(900, _pullFrames));
+      expect(b.bufferDepthMs, 10);
+      expect(_left(b.pullSamples(_pullFrames * 2, 1000000)).first, 100);
     });
 
-    test('isInUnderrun becomes true after exhausting the buffer', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isFalse);
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isTrue);
-    });
-
-    test('isInUnderrun clears when fresh audio arrives after underrun', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
-      buffer.pullSamples(960);
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isTrue);
-      buffer.addChunk(2000, Int16List.fromList(List.filled(960, 2)));
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isFalse);
-    });
-
-    test('flush resets isInUnderrun flag', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
-      buffer.pullSamples(960);
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isTrue);
-      buffer.flush();
-      expect(buffer.isInUnderrun, isFalse);
-    });
-
-    test('static-delay hold does not flag isInUnderrun', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.outputDelayMs = 1000; // 96000 samples needed
-      buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
-      final result = buffer.pullSamples(960);
-      expect(result, Int16List(960));
-      expect(buffer.isInUnderrun, isFalse);
-    });
-
-    test('pre-startup silence does not flag isInUnderrun', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 100,
-        maxBufferMs: 15000,
-      );
-      buffer.pullSamples(960);
-      expect(buffer.isInUnderrun, isFalse);
-    });
-
-    test('partial chunk consumption advances offset correctly', () {
-      final buffer = SendspinBuffer(
-        sampleRate: 48000,
-        channels: 2,
-        startupBufferMs: 0,
-        maxBufferMs: 15000,
-      );
-      buffer.addChunk(1000, Int16List.fromList([1, 2, 3, 4, 5, 6]));
-      final first = buffer.pullSamples(2);
-      expect(first, [1, 2]);
-      final second = buffer.pullSamples(4);
-      expect(second, [3, 4, 5, 6]);
+    test('a pull size that is not a whole number of frames is rejected', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      b.pullSamples(960, 1000000);
+      expect(() => b.pullSamples(961, 1010000), throwsArgumentError);
     });
   });
 
-  group('SendspinBuffer sync correction', () {
-    const int sampleRate = 48000;
-    const int channels = 2;
-    const int pullSize = 960; // 10 ms of stereo audio
-    const int frameDurationUs = 10000; // 10 ms in us
-
-    SendspinBuffer makeBuffer() => SendspinBuffer(
-          sampleRate: sampleRate,
-          channels: channels,
-          startupBufferMs: 0,
-          maxBufferMs: 15000,
-        );
-
-    test('deadband: sync error < 2 ms produces no correction', () {
-      final buffer = makeBuffer();
-      buffer.addChunk(0, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
-      buffer.addChunk(9000, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
-      expect(buffer.syncErrorUs.abs(), lessThan(2000));
-      expect(buffer.bufferDepthMs, 0);
+  group('output delay', () {
+    test('is subtracted from the translated timestamp', () {
+      final b = _buffer()..outputDelayMs = 100;
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      // Due 100 ms earlier on the local clock.
+      expect(b.pullSamples(_pullFrames * 2, 800000), everyElement(0));
+      expect(_left(b.pullSamples(_pullFrames * 2, 900000)).first, 100);
     });
 
-    test('micro-correction when behind: drops frames over time', () {
-      final buffer = makeBuffer();
-      const int bigChunkSamples = 48000; // 500 ms
-      buffer.addChunk(0, Int16List(bigChunkSamples));
-      for (var i = 0; i < 20; i++) {
-        buffer.pullSamples(pullSize);
+    test('an increase mid-stream skips ahead and playback continues', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      b.outputDelayMs = 50;
+      // Everything is now due 50 ms earlier: 2400 frames are skipped.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
+      expect(left.first, 1 + 480 + 2400 + 1);
+      expect(b.resyncCount, 2);
+    });
+
+    test('a decrease mid-stream waits with silence and stays operational', () {
+      final b = _buffer()..outputDelayMs = 50;
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 950000);
+      b.outputDelayMs = 0;
+      // The next frame is now due 50 ms later.
+      for (var p = 1; p <= 5; p++) {
+        expect(b.pullSamples(_pullFrames * 2, 950000 + p * _pullUs),
+            everyElement(0));
       }
-      expect(buffer.bufferDepthMs, lessThan(300));
-      expect(buffer.syncErrorUs, greaterThan(0));
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
+      expect(left.first, 1 + 480 + 1);
+    });
+  });
+
+  group('one-shot resynchronization', () {
+    test('an underrun is followed by a snap to the next chunk', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      b.pullSamples(_pullFrames * 2, 1000000);
+      expect(b.pullSamples(_pullFrames * 2, 1010000), everyElement(0));
+
+      // Audio resumes 30 ms later, 2 ms into a pull.
+      _add(b, 1042000, _ramp(500, _pullFrames));
+      final left = _left(b.pullSamples(_pullFrames * 2, 1040000));
+      expect(left.sublist(0, 96), everyElement(0));
+      expect(left[96], 500);
     });
 
-    test('micro-correction when ahead: pads frames over time', () {
-      final buffer = makeBuffer();
-      buffer.addChunk(0, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
+    test('a missing chunk becomes silence of the same length', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      // The chunk for 1.010 s never arrives.
+      _add(b, 1020000, _ramp(2000, _pullFrames));
+      _left(b.pullSamples(_pullFrames * 2, 1000000));
+      expect(b.pullSamples(_pullFrames * 2, 1010000), everyElement(0));
+      expect(_left(b.pullSamples(_pullFrames * 2, 1020000)).first, 2000);
+    });
 
-      const int chunkCount = 50;
-      const int chunkSpacing = 20000;
-      var ts = frameDurationUs + 100000;
-      for (var i = 0; i < chunkCount; i++) {
-        buffer.addChunk(ts, Int16List(pullSize));
-        ts += chunkSpacing;
+    test('a gap inside one pull is filled with silence in place', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, 240));
+      // 5 ms of audio, a 2 ms hole, then more audio.
+      _add(b, 1007000, _ramp(700, 240));
+      final left = _left(b.pullSamples(_pullFrames * 2, 1000000));
+      expect(left.sublist(0, 240), List.generate(240, (i) => 100 + i));
+      expect(left.sublist(240, 336), everyElement(0));
+      expect(left[336], 700);
+    });
+
+    test('an error beyond 1 ms is corrected in one step, not gradually', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      // The output clock jumps 3 ms ahead of the audio.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1013000));
+      expect(left.first, 1 + 480 + 144 + 1);
+      expect(b.resyncCount, 2);
+      expect(b.framesDropped, 0, reason: 'a resync is not a soft correction');
+    });
+
+    test('flush discards everything and the next chunk starts cleanly', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      b.flush();
+      expect(b.bufferDepthMs, 0);
+      expect(b.pullSamples(_pullFrames * 2, 1010000), everyElement(0));
+
+      _add(b, 5000000, _ramp(100, _pullFrames));
+      expect(_left(b.pullSamples(_pullFrames * 2, 5000000)).first, 100);
+    });
+  });
+
+  group('late chunks', () {
+    test('a chunk that arrives after its time has passed is dropped', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      b.pullSamples(_pullFrames * 2, 1000000);
+      b.pullSamples(_pullFrames * 2, 1010000);
+
+      _add(b, 1005000, _ramp(900, 240));
+      expect(b.bufferDepthMs, 0);
+      expect(b.lateChunksDropped, 1);
+    });
+
+    test('a chunk that is only partly late is kept', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      b.pullSamples(_pullFrames * 2, 1000000);
+      _add(b, 1005000, _ramp(900, _pullFrames));
+      expect(b.bufferDepthMs, 10);
+    });
+  });
+
+  group('steady-state correction', () {
+    /// Plays one second with the output clock running [ppm] parts per
+    /// million fast (positive) or slow relative to the audio, and returns
+    /// the buffer.
+    SendspinBuffer playWithDrift(int ppm, {int pullFrames = _pullFrames}) {
+      final b = _buffer();
+      _addStream(b, 1000000, seconds: 3);
+      final pullUs = pullFrames * 1000000 / _rate;
+      final pulls = (2 * _rate / pullFrames).round();
+      for (var p = 0; p < pulls; p++) {
+        final t = 1000000 + p * pullUs * (1 + ppm / 1e6);
+        b.pullSamples(pullFrames * 2, t.round());
       }
+      return b;
+    }
 
-      final depthBefore = buffer.bufferDepthMs;
-
-      var hadNegativeError = false;
-      for (var i = 0; i < 30; i++) {
-        final samples = buffer.pullSamples(pullSize);
-        expect(samples.length, pullSize);
-        if (buffer.syncErrorUs < 0) hadNegativeError = true;
-      }
-
-      expect(hadNegativeError, true,
-          reason: 'sync error should have been negative at some point');
-
-      final depthAfter = buffer.bufferDepthMs;
-      const normalDrain = 30 * 10;
-      final actualDrain = depthBefore - depthAfter;
-      expect(actualDrain, lessThan(normalDrain),
-          reason: 'ahead correction should slow buffer drain');
+    test('an error inside the dead band is left alone', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      // 60 µs late: under the 100 µs dead band.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010060));
+      expect(left.first, 1 + 480 + 1);
+      expect(b.framesDropped, 0);
+      expect(b.framesInserted, 0);
+      expect(b.syncErrorUs, 60);
     });
 
-    test('re-anchor: sync error > 500 ms flushes the buffer', () {
-      final buffer = makeBuffer();
-      buffer.addChunk(1000000, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
-      buffer.addChunk(1, Int16List(pullSize));
-      final result = buffer.pullSamples(pullSize);
-      expect(result, Int16List(pullSize));
-      expect(buffer.bufferDepthMs, 0);
+    test('running late drops single frames to catch up', () {
+      final b = playWithDrift(200);
+      expect(b.framesDropped, greaterThan(0));
+      expect(b.framesInserted, 0);
+      expect(b.resyncCount, 1, reason: 'drift is absorbed without resyncing');
+      expect(b.syncErrorUs.abs(), lessThan(200));
     });
 
-    test(
-        'first re-anchor fires regardless of cooldown (filter convergence '
-        'mid-stream)', () {
-      // The cooldown is anti-thrash, not a startup grace period. When the
-      // time-filter converges shortly after stream start, all chunk
-      // timestamps shift domains; the buffer must flush immediately even
-      // if the cooldown window has not yet elapsed.
-      final buffer = makeBuffer();
-      buffer.addChunk(0, Int16List(57600));
-      buffer.pullSamples(pullSize);
-      // ~520 ms of playback — well inside the 5 s cooldown window.
-      for (var i = 0; i < 51; i++) {
-        buffer.pullSamples(pullSize);
-      }
-      // Inject a chunk at ts=1 (~520 ms in the past): triggers re-anchor.
-      buffer.addChunk(1, Int16List(pullSize));
-      final depthBefore = buffer.bufferDepthMs;
-      expect(depthBefore, greaterThan(0),
-          reason: 'buffer should have data before pull');
-      buffer.pullSamples(pullSize);
-      // First re-anchor flushes — depth drops to zero.
-      expect(buffer.bufferDepthMs, equals(0),
-          reason: 'first re-anchor must always fire (no cooldown gate)');
+    test('running early duplicates single frames to wait', () {
+      final b = playWithDrift(-200);
+      expect(b.framesInserted, greaterThan(0));
+      expect(b.framesDropped, 0);
+      expect(b.resyncCount, 1);
+      expect(b.syncErrorUs.abs(), lessThan(200));
     });
 
-    test('subsequent re-anchors within 5 s are blocked by cooldown', () {
-      // After the first re-anchor has run, the cooldown gate engages and
-      // a second re-anchor within 5 s is suppressed in favour of
-      // micro-correction.
-      final buffer = makeBuffer();
-
-      // Burn the first re-anchor.
-      buffer.addChunk(0, Int16List(57600));
-      buffer.pullSamples(pullSize);
-      for (var i = 0; i < 51; i++) {
-        buffer.pullSamples(pullSize);
-      }
-      buffer.addChunk(1, Int16List(pullSize));
-      buffer.pullSamples(pullSize); // flushes (first re-anchor)
-      expect(buffer.bufferDepthMs, equals(0));
-
-      // Re-prime, advance only a little (<5 s), then trigger another
-      // would-be-re-anchor. Cooldown must hold; depth should NOT go to
-      // zero, it should remain non-zero (micro-correction took over).
-      buffer.addChunk(2000000, Int16List(57600));
-      buffer.pullSamples(pullSize); // anchor on ts=2000000
-      for (var i = 0; i < 5; i++) {
-        buffer.pullSamples(pullSize);
-      }
-      buffer.addChunk(2000001, Int16List(pullSize));
-      final depthBefore = buffer.bufferDepthMs;
-      expect(depthBefore, greaterThan(0));
-      buffer.pullSamples(pullSize);
-      // Cooldown should have suppressed the flush; depth must not be 0.
-      expect(buffer.bufferDepthMs, greaterThan(0),
-          reason: 'cooldown should suppress second re-anchor within 5s');
+    test('corrects by one frame per pull at 48 kHz', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      // 500 µs late: 24 frames behind, but only one is dropped now.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010500));
+      expect(b.framesDropped, 1);
+      expect(left.first, 1 + 480 + 1 + 1);
+      // The rest of the pull is untouched audio.
+      expect(left.last, left.first + 479);
     });
 
-    test('correction rate clamped to +-4 percent of pull size', () {
-      final buffer = makeBuffer();
-      const int bigBlock = 960000; // 10 s
-      buffer.addChunk(0, Int16List(bigBlock));
-      buffer.pullSamples(pullSize);
-      const int pullCount = 48;
-      for (var i = 0; i < pullCount; i++) {
-        buffer.pullSamples(pullSize);
-      }
-      final remainingMs = buffer.bufferDepthMs;
-      const int noCorrectionRemaining = 912960;
-      const int maxTotalExtra = 48 * 39;
-      const int minRemainingSamples = noCorrectionRemaining - maxTotalExtra;
-      const int minRemainingMs = minRemainingSamples ~/ 96;
-      expect(remainingMs, greaterThanOrEqualTo(minRemainingMs),
-          reason: 'buffer should not drain faster than 4% correction allows');
-      const int noCorrectionRemainingMs = noCorrectionRemaining ~/ 96;
-      expect(remainingMs, lessThan(noCorrectionRemainingMs),
-          reason: 'some frame-dropping correction should have occurred');
+    test('a duplicated frame repeats and the rest is bit-exact', () {
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      // 500 µs early.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1009500));
+      expect(b.framesInserted, 1);
+      expect(left[0], left[1]);
+      expect(left.last, left[1] + 478);
     });
 
-    test('output length always equals requested count regardless of correction',
-        () {
-      final buffer = makeBuffer();
-      buffer.addChunk(0, Int16List(96000));
-      for (var i = 0; i < 30; i++) {
-        final result = buffer.pullSamples(pullSize);
-        expect(result.length, pullSize,
-            reason: 'pull $i should return exactly $pullSize samples');
-        expect(result, isA<Int16List>());
-      }
-    });
-
-    test('when ahead, output is padded with duplicated last frame', () {
-      final buffer = makeBuffer();
-      final anchor = Int16List.fromList(List.filled(pullSize, 42));
-      buffer.addChunk(0, anchor);
-      buffer.pullSamples(pullSize);
-      const int aheadTs = 200000;
-      final aheadData = Int16List.fromList(List.filled(pullSize, 7));
-      buffer.addChunk(aheadTs, aheadData);
-      final result = buffer.pullSamples(pullSize);
-      expect(result.length, pullSize);
-      final nonZeroCount = result.where((s) => s == 7).length;
-      expect(nonZeroCount, pullSize,
-          reason:
-              'all samples should be 7 (pulled or duplicated from last frame)');
-    });
-
-    test('syncErrorUs getter reflects last computed error', () {
-      final buffer = makeBuffer();
-      expect(buffer.syncErrorUs, 0);
-      buffer.addChunk(0, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
-      buffer.addChunk(5000, Int16List(pullSize));
-      buffer.pullSamples(pullSize);
-      expect(buffer.syncErrorUs, 5000);
-    });
-
-    test('deadband resets correction accumulator', () {
-      final buffer = makeBuffer();
-      buffer.addChunk(0, Int16List(pullSize * 10));
-      for (var i = 0; i < 5; i++) {
-        buffer.pullSamples(pullSize);
-      }
-      expect(buffer.syncErrorUs.abs(), greaterThan(2000));
-      buffer.flush();
-      var ts = 0;
-      for (var i = 0; i < 10; i++) {
-        buffer.addChunk(ts, Int16List(pullSize));
-        ts += frameDurationUs;
-      }
-      buffer.pullSamples(pullSize);
-      buffer.pullSamples(pullSize);
-      expect(buffer.syncErrorUs.abs(), lessThanOrEqualTo(2000));
-    });
-
-    group('late-chunk drop', () {
-      SendspinBuffer makeBuffer() => SendspinBuffer(
-            sampleRate: 48000,
-            channels: 2,
-            startupBufferMs: 0,
-            maxBufferMs: 15000,
-          );
-      const int pullSize = 960; // 480 frames @ 48k stereo = 10 ms
-
-      test('drops a chunk whose entire duration is before the playhead', () {
-        final buffer = makeBuffer();
-        buffer.addChunk(0, Int16List(pullSize)); // 10 ms chunk
-        // Anchor on ts=0 and advance the playhead a few hundred ms.
-        for (var i = 0; i < 30; i++) {
-          buffer.pullSamples(pullSize);
+    test('the correction rate stays within 0.5% over any 150 ms', () {
+      for (final pullFrames in [64, 128, 480, 1024, 4800]) {
+        final b = _buffer();
+        _addStream(b, 1000000, seconds: 3);
+        final pullUs = pullFrames * 1000000 / _rate;
+        // Aligned at startup, then the output clock sits 900 µs ahead: an
+        // error that always wants correcting but never forces a resync.
+        final history = <(double, int)>[];
+        var corrected = 0;
+        for (var p = 0; p * pullUs < 2000000; p++) {
+          final t = 1000000 + p * pullUs;
+          b.pullSamples(pullFrames * 2, (t + (p == 0 ? 0 : 900)).round());
+          final now = b.framesDropped + b.framesInserted;
+          history.add((t, now - corrected));
+          corrected = now;
+          // Sum corrections over the trailing 150 ms.
+          final window = history
+              .where((h) => h.$1 > t - 150000)
+              .fold<int>(0, (sum, h) => sum + h.$2);
+          expect(window, lessThanOrEqualTo((0.005 * 0.150 * _rate).floor()),
+              reason: 'pull of $pullFrames frames at ${t.round()} us');
         }
-        // Late chunk: ends at -1 us + 10 ms = 9999 us, well behind playhead
-        // (~290_000 us by now). Should be dropped.
-        final depthBefore = buffer.bufferDepthMs;
-        buffer.addChunk(-1, Int16List(pullSize));
-        expect(buffer.bufferDepthMs, equals(depthBefore),
-            reason: 'late chunk should be dropped, depth unchanged');
-      });
+        expect(corrected, greaterThan(0), reason: 'pull of $pullFrames frames');
+      }
+    });
 
-      test('keeps a chunk whose tail extends past the playhead', () {
-        final buffer = makeBuffer();
-        buffer.addChunk(0, Int16List(pullSize));
-        // Advance just one pull (~10 ms).
-        buffer.pullSamples(pullSize);
-        // A chunk anchored 5 ms in the past but lasting 10 ms still has
-        // 5 ms of audio in the future — keep it.
-        final depthBefore = buffer.bufferDepthMs;
-        buffer.addChunk(5000, Int16List(pullSize));
-        expect(buffer.bufferDepthMs, greaterThan(depthBefore),
-            reason: 'partially-future chunk should be kept');
-      });
+    test('scales the step with the sample rate', () {
+      SendspinBuffer at(int rate) {
+        final b = _buffer();
+        final frames = rate ~/ 100;
+        for (var c = 0; c < 10; c++) {
+          b.addChunk(1000000 + c * 10000, Int16List(frames * 2),
+              sampleRate: rate, channels: 2);
+        }
+        b.pullSamples(frames * 2, 1000000);
+        b.pullSamples(frames * 2, 1010500);
+        return b;
+      }
 
-      test('does not drop chunks before playback is anchored', () {
-        // Without an anchor we cannot meaningfully classify "late". The
-        // first chunk in becomes the anchor regardless of timestamp.
-        final buffer = makeBuffer();
-        buffer.addChunk(-1000000, Int16List(pullSize));
-        expect(buffer.bufferDepthMs, greaterThan(0),
-            reason: 'no anchor yet — chunk must be accepted as the anchor');
-      });
+      expect(at(44100).framesDropped, 1);
+      expect(at(96000).framesDropped, 2);
+      expect(at(192000).framesDropped, 4);
+    });
+  });
+
+  group('format changes', () {
+    test('chunks keep the format they were added with', () {
+      final b = _buffer();
+      final changes = <(int, int)>[];
+      b.onFormatChange = (rate, channels) => changes.add((rate, channels));
+
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      // The next chunk continues the timeline at 44.1 kHz mono.
+      _add(b, 1010000, _ramp(5000, 441, channels: 1),
+          sampleRate: 44100, channels: 1);
+
+      expect(_left(b.pullSamples(_pullFrames * 2, 1000000)).last, 579);
+      expect(changes, isEmpty, reason: 'still inside the 48 kHz audio');
+
+      // Reaching the new chunk reports the change and plays nothing of it
+      // into a pull that was sized for the old format.
+      expect(b.pullSamples(_pullFrames * 2, 1010000), everyElement(0));
+      expect(changes, [(44100, 1)]);
+      expect(b.sampleRate, 44100);
+      expect(b.channels, 1);
+
+      // The consumer now pulls in the new format and gets the new audio at
+      // the right place on the timeline.
+      final out = b.pullSamples(441, 1020000);
+      expect(out, everyElement(0), reason: 'that audio was due at 1.010 s');
+    });
+
+    test('a format change mid-pull ends that pull with silence', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, 240));
+      _add(b, 1005000, _ramp(5000, 441, channels: 1),
+          sampleRate: 44100, channels: 1);
+      final left = _left(b.pullSamples(_pullFrames * 2, 1000000));
+      expect(left.sublist(0, 240), List.generate(240, (i) => 100 + i));
+      expect(left.sublist(240), everyElement(0));
+    });
+
+    test('the first chunk sets the format without a change notification', () {
+      final b = _buffer();
+      var changes = 0;
+      b.onFormatChange = (_, __) => changes++;
+      _add(b, 1000000, _ramp(100, 441, channels: 1),
+          sampleRate: 44100, channels: 1);
+      expect(b.pullSamples(441, 1000000).first, 100);
+      expect(changes, 0);
+    });
+
+    test('new-format audio plays on schedule after the switch', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, _pullFrames));
+      for (var c = 0; c < 5; c++) {
+        _add(b, 1010000 + c * 10000, _ramp(5000 + c * 441, 441, channels: 1),
+            sampleRate: 44100, channels: 1);
+      }
+      b.pullSamples(_pullFrames * 2, 1000000);
+      b.pullSamples(_pullFrames * 2, 1010000); // reports the change
+      // Pulling 10 ms of mono 44.1 kHz for the slot starting at 1.020 s.
+      expect(b.pullSamples(441, 1020000).first, 5441);
+    });
+  });
+
+  group('buffer accounting', () {
+    test('bufferDepthMs counts what has not been played', () {
+      final b = _buffer();
+      _addStream(b, 1000000, seconds: 0.5);
+      expect(b.bufferDepthMs, 500);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      expect(b.bufferDepthMs, 490);
+    });
+
+    test('the oldest audio is trimmed beyond maxBufferMs', () {
+      final b = SendspinBuffer(serverToLocalUs: (t) => t, maxBufferMs: 100);
+      _addStream(b, 1000000, seconds: 0.5);
+      expect(b.bufferDepthMs, 100);
+      // What is left is the newest 100 ms.
+      final left = _left(b.pullSamples(_pullFrames * 2, 1400000));
+      expect(left.first, 1 + 40 * 480 + 1);
     });
   });
 }

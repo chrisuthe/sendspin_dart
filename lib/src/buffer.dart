@@ -1,309 +1,332 @@
+// ABOUTME: Clock-scheduled jitter buffer for decoded PCM audio chunks.
+// ABOUTME: Plays each frame at the local time its server timestamp maps to.
 import 'dart:collection';
-import 'dart:math';
 import 'dart:typed_data';
 
 class _AudioChunk implements Comparable<_AudioChunk> {
+  /// Server-clock time at which the first frame should be output.
   final int timestampUs;
-  Int16List samples;
+  final Int16List samples;
+  final int sampleRate;
+  final int channels;
 
-  /// Offset into [samples] where unconsumed data begins.
-  int offset;
+  /// Frames already consumed from the front.
+  int offset = 0;
 
-  _AudioChunk(this.timestampUs, this.samples) : offset = 0;
+  _AudioChunk(this.timestampUs, this.samples, this.sampleRate, this.channels);
 
-  /// Number of unconsumed samples remaining in this chunk.
-  int get remaining => samples.length - offset;
+  int get frames => samples.length ~/ channels;
+  int get remaining => frames - offset;
+
+  /// Server-clock time of the next unconsumed frame.
+  int get headUs => timestampUs + (offset * 1000000 / sampleRate).round();
+
+  int get durationUs => (frames * 1000000 / sampleRate).round();
 
   @override
   int compareTo(_AudioChunk other) => timestampUs.compareTo(other.timestampUs);
 }
 
-/// Pull-based jitter buffer for PCM audio chunks.
+/// Pull-based jitter buffer that schedules audio against the local clock.
 ///
-/// Chunks arrive out of order from the network (timestamped in microseconds).
-/// The buffer sorts them by timestamp and feeds them to the audio sink in order
-/// via [pullSamples]. Silence (zeros) is returned on underrun.
+/// Chunks carry server timestamps. Each [pullSamples] call says when its
+/// first sample will reach the output, and the buffer returns exactly the
+/// audio that is due then, translating timestamps through [serverToLocalUs]
+/// (the time filter) at the moment of the pull and subtracting the output
+/// delay.
 ///
-/// Startup buffering: [startupBufferMs] of audio must accumulate before any
-/// samples are released. This prevents glitchy startup when the first few
-/// packets arrive in a burst. Call [flush] to reset (e.g. on stream restart).
+/// Following the Sendspin player role:
 ///
-/// Overflow trimming: if the total buffered audio exceeds [maxBufferMs], the
-/// oldest chunks are dropped to keep memory bounded.
+/// - On startup, after [flush], after an underrun, and whenever the error
+///   exceeds 1 ms, playback **snaps** to position in one step: a late prefix
+///   is dropped, or silence is inserted until the audio is due.
+/// - In steady state an error above a 100 µs dead band is corrected by
+///   dropping or duplicating a few whole frames, never more than 0.5% of the
+///   audio in any 150 ms. Everything else is passed through bit-exact.
+/// - A chunk that arrives after its time has passed is dropped.
+/// - Each chunk keeps the format it was added with, so a format change on a
+///   running stream does not disturb the audio already buffered.
 class SendspinBuffer {
-  final int sampleRate;
-  final int channels;
-  final int startupBufferMs;
+  /// Translates a server timestamp to the local clock that [pullSamples] is
+  /// given times in. Normally [SendspinClock.computeClientTime].
+  final int Function(int serverTimeUs) serverToLocalUs;
+
+  /// Upper bound on buffered audio; beyond it the oldest audio is dropped.
   final int maxBufferMs;
 
-  // Sync correction constants
-  static const int _correctionDeadbandUs = 2000;
-  static const int _reanchorThresholdUs = 500000;
-  static const int _reanchorCooldownUs = 5000000;
-  static const double _maxSpeedCorrection = 0.04;
-  static const double _correctionTargetSeconds = 2.0;
+  /// Errors below this are not corrected.
+  static const int deadbandUs = 100;
+
+  /// Errors above this are corrected in one step instead of gradually.
+  static const int resyncThresholdUs = 1000;
+
+  /// Steady-state correction changes the playback speed by at most this
+  /// fraction, measured over [speedWindowUs].
+  static const double maxSpeedDeviation = 0.005;
+  static const int speedWindowUs = 150000;
+
+  /// Duration of one correction step; the frame count scales with the rate.
+  static const int _correctionStepUs = 21;
 
   final SplayTreeSet<_AudioChunk> _chunks = SplayTreeSet();
-  int _totalSamples = 0;
-  bool _startupMet = false;
-  int _outputDelayMs = 0;
+  int _bufferedUs = 0;
+  int _outputDelayUs = 0;
 
-  bool _hasProducedAudio = false;
-  bool _inUnderrun = false;
+  int? _sampleRate;
+  int? _channels;
 
-  /// True once a pull has returned silence after real audio started flowing.
-  /// Cleared when a subsequent pull returns real data.
-  bool get isInUnderrun => _inUnderrun;
+  /// False until playback has been aligned to the timeline, and again after
+  /// anything that breaks continuity.
+  bool _synced = false;
 
-  /// Sets the output delay in milliseconds for multi-room sync.
-  ///
-  /// The delay offsets when samples become eligible for playback, effectively
-  /// holding audio in the buffer longer to compensate for speaker distance.
-  set outputDelayMs(int value) => _outputDelayMs = value;
+  /// Local time just past the last sample handed out.
+  int? _outputEndUs;
 
-  // Sync correction state
-  bool _playbackAnchored = false;
-  int _playbackPositionUs = 0;
-  int _lastReanchorUs = 0;
+  /// Recent soft corrections as (output time, frames), for the speed limit.
+  final Queue<(int, int)> _recentCorrections = Queue();
 
-  /// `true` once a re-anchor (mid-stream flush) has occurred. The cooldown
-  /// gate is meant to prevent re-anchor *thrashing*; the very first
-  /// re-anchor must always be allowed even if it happens early in
-  /// playback (e.g. the time-filter converging during a short startup
-  /// window and shifting all chunk timestamps from server-clock domain to
-  /// client-clock domain).
-  bool _hasReanchored = false;
-
-  /// Accumulated fractional correction frames from micro-correction.
-  double _correctionAccumulator = 0.0;
-
-  /// Last computed sync error in microseconds (for diagnostics).
-  int get syncErrorUs => _lastSyncErrorUs;
   int _lastSyncErrorUs = 0;
+  int _framesDropped = 0;
+  int _framesInserted = 0;
+  int _resyncCount = 0;
+  int _lateChunksDropped = 0;
 
-  SendspinBuffer({
-    required this.sampleRate,
-    required this.channels,
-    required this.startupBufferMs,
-    required this.maxBufferMs,
-  }) {
-    if (startupBufferMs == 0) _startupMet = true;
+  /// Called when playback reaches audio in a different format from the one
+  /// being output. The pull in which this fires returns silence; later pulls
+  /// must be sized for the new format.
+  void Function(int sampleRate, int channels)? onFormatChange;
+
+  SendspinBuffer({required this.serverToLocalUs, required this.maxBufferMs});
+
+  /// Sample rate of the audio currently being output, once known.
+  int? get sampleRate => _sampleRate;
+
+  /// Channel count of the audio currently being output, once known.
+  int? get channels => _channels;
+
+  /// Output delay in milliseconds, subtracted from every translated
+  /// timestamp: audio is handed out that much earlier.
+  set outputDelayMs(int value) => _outputDelayUs = value * 1000;
+
+  /// Buffered audio not yet played, in milliseconds.
+  int get bufferDepthMs => _bufferedUs ~/ 1000;
+
+  /// The last measured error in microseconds: positive when the audio was
+  /// running late against its schedule, negative when early.
+  int get syncErrorUs => _lastSyncErrorUs;
+
+  /// Frames removed by steady-state correction.
+  int get framesDropped => _framesDropped;
+
+  /// Frames duplicated by steady-state correction.
+  int get framesInserted => _framesInserted;
+
+  /// One-shot resynchronizations, including the initial alignment.
+  int get resyncCount => _resyncCount;
+
+  /// Chunks discarded because they arrived after their time had passed.
+  int get lateChunksDropped => _lateChunksDropped;
+
+  /// Sets the format pulls are sized for before any audio has arrived.
+  void setOutputFormat({required int sampleRate, required int channels}) {
+    _sampleRate = sampleRate;
+    _channels = channels;
   }
 
-  /// Samples per millisecond (accounts for stereo/multi-channel interleaving).
-  int get _samplesPerMs => sampleRate * channels ~/ 1000;
+  /// Local time at which [chunk]'s next unconsumed frame is due.
+  int _dueUs(_AudioChunk chunk) =>
+      serverToLocalUs(chunk.headUs) - _outputDelayUs;
 
-  /// Current buffer depth in milliseconds.
-  int get bufferDepthMs =>
-      _samplesPerMs > 0 ? _totalSamples ~/ _samplesPerMs : 0;
-
-  /// Add a decoded PCM chunk with a network timestamp in microseconds.
+  /// Adds decoded PCM whose first frame is due at server time [timestampUs].
   ///
-  /// Chunks with duplicate timestamps are rejected (the first one wins).
-  /// Once playback is anchored, chunks whose entire duration falls before
-  /// the current playhead are dropped (per Sendspin spec: "Audio chunks
-  /// may arrive with timestamps in the past due to network delays or
-  /// buffering; clients should drop these late chunks to maintain sync").
-  void addChunk(int timestampUs, Int16List samples) {
-    // Drop late chunks once we have a playhead to compare against. Before
-    // anchoring, the first chunk in becomes the anchor regardless of its
-    // timestamp; we cannot meaningfully classify "late" until then.
-    if (_playbackAnchored && samples.isNotEmpty) {
-      final framesInChunk = samples.length ~/ channels;
-      if (framesInChunk > 0) {
-        final chunkDurationUs = (framesInChunk * 1000000) ~/ sampleRate;
-        if (timestampUs + chunkDurationUs <= _playbackPositionUs) {
-          return;
-        }
-      }
-    }
+  /// Chunks may arrive out of order. A second chunk with a timestamp already
+  /// held is ignored, and so is one whose whole duration has already been
+  /// passed by the output.
+  void addChunk(
+    int timestampUs,
+    Int16List samples, {
+    required int sampleRate,
+    required int channels,
+  }) {
+    if (samples.length < channels) return;
+    final chunk = _AudioChunk(
+        timestampUs, Int16List.fromList(samples), sampleRate, channels);
 
-    // SplayTreeSet uses compareTo for equality — duplicate timestamps collide.
-    // Wrap in a fresh object each time; if insertion fails it's a duplicate.
-    final chunk = _AudioChunk(timestampUs, Int16List.fromList(samples));
-    final added = _chunks.add(chunk);
-    if (!added) {
+    final outputEnd = _outputEndUs;
+    if (outputEnd != null &&
+        serverToLocalUs(timestampUs + chunk.durationUs) - _outputDelayUs <=
+            outputEnd) {
+      _lateChunksDropped++;
       return;
     }
-    _totalSamples += samples.length;
+    if (!_chunks.add(chunk)) return;
+    _bufferedUs += chunk.durationUs;
 
-    // Check startup threshold after each insertion.
-    if (!_startupMet && bufferDepthMs >= startupBufferMs) {
-      _startupMet = true;
+    while (_bufferedUs > maxBufferMs * 1000 && _chunks.length > 1) {
+      _remove(_chunks.first);
     }
-
-    _trimToMax();
   }
 
-  /// Pull [count] samples from the front of the buffer.
-  ///
-  /// Returns samples in timestamp order. If not enough data is available
-  /// (or startup threshold has not been met), the missing samples are filled
-  /// with silence (zeros).
-  ///
-  /// Sync corrections are applied transparently:
-  /// - **Deadband** (< 2ms): no correction.
-  /// - **Micro-correction** (2ms-500ms): drop or duplicate individual frames
-  ///   at a rate clamped to +/-4% of the pull rate.
-  /// - **Re-anchor** (> 500ms): flush the buffer and restart playback
-  ///   tracking (with a 5-second cooldown).
-  Int16List pullSamples(int count) {
-    if (!_startupMet) {
-      return Int16List(count);
-    }
-    if (_chunks.isEmpty) {
-      if (_hasProducedAudio) _inUnderrun = true;
-      return Int16List(count);
-    }
+  void _remove(_AudioChunk chunk) {
+    _chunks.remove(chunk);
+    _bufferedUs -= (chunk.remaining * 1000000 / chunk.sampleRate).round();
+    if (_chunks.isEmpty) _bufferedUs = 0;
+  }
 
-    // Static delay: hold back enough samples to cover the delay period.
-    if (_outputDelayMs > 0) {
-      final delaySamples = _outputDelayMs * _samplesPerMs;
-      if (_totalSamples <= delaySamples) {
-        return Int16List(count);
+  /// Consumes [frames] frames from the front of [chunk].
+  void _consume(_AudioChunk chunk, int frames) {
+    chunk.offset += frames;
+    _bufferedUs -= (frames * 1000000 / chunk.sampleRate).round();
+    if (chunk.remaining <= 0) {
+      _chunks.remove(chunk);
+      if (_chunks.isEmpty) _bufferedUs = 0;
+    }
+  }
+
+  /// Returns [count] interleaved samples whose first sample will be output
+  /// at local time [outputTimeUs] (now plus whatever delay lies between this
+  /// call and the audio port). Anything not covered by due audio is silence.
+  Int16List pullSamples(int count, int outputTimeUs) {
+    final out = Int16List(count);
+    final head = _chunks.isEmpty ? null : _chunks.first;
+
+    // Reaching audio in another format: report it and let the caller resize.
+    if (head != null &&
+        (head.sampleRate != _sampleRate || head.channels != _channels)) {
+      final first = _sampleRate == null;
+      _sampleRate = head.sampleRate;
+      _channels = head.channels;
+      _synced = false;
+      if (!first) {
+        onFormatChange?.call(head.sampleRate, head.channels);
+        return out;
       }
     }
 
-    // Anchor playback position to the first chunk we ever play.
-    if (!_playbackAnchored) {
-      _playbackPositionUs = _chunks.first.timestampUs;
-      _playbackAnchored = true;
-      _lastReanchorUs = _playbackPositionUs;
+    final rate = _sampleRate;
+    final channels = _channels;
+    if (rate == null || channels == null) return out;
+    if (count % channels != 0) {
+      throw ArgumentError.value(
+          count, 'count', 'must be a whole number of $channels-channel frames');
     }
-
-    // The number of frames (not samples) we are pulling.
     final frames = count ~/ channels;
+    int usOf(int n) => (n * 1000000 / rate).round();
+    int framesOf(int us) => (us * rate / 1000000).round();
 
-    // Compute sync error: positive = we are behind (need to skip/drop),
-    // negative = we are ahead (need to insert/duplicate).
-    final int chunkTimestampUs =
-        _chunks.isNotEmpty ? _chunks.first.timestampUs : _playbackPositionUs;
-    _lastSyncErrorUs = _playbackPositionUs - chunkTimestampUs;
+    var written = 0;
+    var aligned = _synced;
+    var firstChunk = true;
+    var resyncing = false;
 
-    final int absSyncError = _lastSyncErrorUs.abs();
-
-    // --- RE-ANCHOR ---
-    if (absSyncError > _reanchorThresholdUs) {
-      final int nowUs = _playbackPositionUs;
-      // Cooldown prevents thrashing on subsequent re-anchors but never
-      // blocks the FIRST one — convergence-time domain shifts can
-      // legitimately fire it well within the cooldown window.
-      if (!_hasReanchored ||
-          (nowUs - _lastReanchorUs).abs() > _reanchorCooldownUs) {
-        _hasReanchored = true;
-        flush();
-        return Int16List(count);
-      }
-    }
-
-    // --- MICRO-CORRECTION ---
-    int adjustedFrames = frames;
-    if (absSyncError > _correctionDeadbandUs) {
-      final double correctionRate =
-          _lastSyncErrorUs / (_correctionTargetSeconds * sampleRate);
-      final double maxAdj = _maxSpeedCorrection * frames;
-      final double clampedRate = correctionRate.clamp(-maxAdj, maxAdj);
-
-      _correctionAccumulator += clampedRate;
-
-      final int wholeFrames = _correctionAccumulator.truncate();
-      if (wholeFrames != 0) {
-        _correctionAccumulator -= wholeFrames;
-        adjustedFrames += wholeFrames;
-        adjustedFrames = max(0, adjustedFrames);
-      }
-    } else {
-      _correctionAccumulator = 0.0;
-    }
-
-    // Pull adjustedFrames * channels samples from the buffer.
-    final pullCount = adjustedFrames * channels;
-    final rawSamples = _pullRaw(pullCount);
-
-    final int frameDurationUs = (frames * 1000000) ~/ sampleRate;
-    _playbackPositionUs += frameDurationUs;
-
-    if (rawSamples.length == count) {
-      _hasProducedAudio = true;
-      _inUnderrun = false;
-      return rawSamples;
-    } else if (rawSamples.length > count) {
-      _hasProducedAudio = true;
-      _inUnderrun = false;
-      return Int16List.sublistView(rawSamples, 0, count);
-    } else {
-      if (_hasProducedAudio) _inUnderrun = true;
-      // Need to expand: duplicate last frame or pad with silence.
-      final result = Int16List(count);
-      result.setRange(0, rawSamples.length, rawSamples);
-      if (rawSamples.length >= channels) {
-        // Duplicate the last frame to fill.
-        int pos = rawSamples.length;
-        while (pos < count) {
-          final needed = min(channels, count - pos);
-          for (int i = 0; i < needed; i++) {
-            result[pos + i] = rawSamples[rawSamples.length - channels + i];
-          }
-          pos += needed;
-        }
-      }
-      // If rawSamples.length < channels, the remaining zeros from Int16List
-      // constructor serve as silence padding.
-      return result;
-    }
-  }
-
-  /// Raw pull: extracts exactly [count] samples from the chunk queue,
-  /// padding with silence on underrun.
-  Int16List _pullRaw(int count) {
-    final result = Int16List(count);
-    int written = 0;
-    var remaining = count;
-
-    while (remaining > 0 && _chunks.isNotEmpty) {
+    while (written < frames && _chunks.isNotEmpty) {
       final chunk = _chunks.first;
-      final available = chunk.remaining;
+      // Audio in another format ends this pull; the next one switches.
+      if (chunk.sampleRate != rate || chunk.channels != channels) break;
 
-      if (available <= remaining) {
-        result.setRange(
-            written, written + available, chunk.samples, chunk.offset);
-        written += available;
-        remaining -= available;
-        _totalSamples -= available;
-        _chunks.remove(chunk);
-      } else {
-        result.setRange(
-            written, written + remaining, chunk.samples, chunk.offset);
-        _totalSamples -= remaining;
-        chunk.offset += remaining;
-        written += remaining;
-        remaining = 0;
+      // Positive: this audio should already have played. Negative: not yet.
+      final errorUs = outputTimeUs + usOf(written) - _dueUs(chunk);
+      if (firstChunk) _lastSyncErrorUs = errorUs;
+
+      if (!aligned || errorUs.abs() > resyncThresholdUs) {
+        // One-shot resynchronization: skip what is late, wait out what is
+        // early. This is the startup, underrun and discontinuity path.
+        if (errorUs > 0) {
+          final late = framesOf(errorUs);
+          if (late >= chunk.remaining) {
+            _remove(chunk);
+            resyncing = true;
+            continue;
+          }
+          _consume(chunk, late);
+        } else {
+          final early = framesOf(-errorUs);
+          if (early >= frames - written) {
+            // Not due within this pull. Stay unaligned so the next pull
+            // lines it up exactly.
+            _synced = false;
+            _outputEndUs = outputTimeUs + usOf(frames);
+            return out;
+          }
+          written += early;
+        }
+        resyncing = true;
+        aligned = true;
+      } else if (firstChunk && errorUs.abs() > deadbandUs) {
+        written += _softCorrect(
+            chunk, errorUs, outputTimeUs, rate, channels, out, frames);
       }
+      firstChunk = false;
+      if (resyncing) {
+        // Counted once, when audio is actually lined up again.
+        _resyncCount++;
+        resyncing = false;
+      }
+
+      final n = chunk.remaining < frames - written
+          ? chunk.remaining
+          : frames - written;
+      out.setRange(written * channels, (written + n) * channels, chunk.samples,
+          chunk.offset * channels);
+      written += n;
+      _consume(chunk, n);
     }
 
-    return result;
+    // Running dry breaks continuity: whatever comes next is lined up afresh.
+    _synced = aligned && written >= frames;
+    _outputEndUs = outputTimeUs + usOf(frames);
+    return out;
   }
 
-  /// Clear all buffered audio and reset the startup requirement.
+  /// Corrects part of a small error at the start of a pull by dropping
+  /// frames (running late) or repeating the next frame (running early),
+  /// within the speed limit. Returns how many output frames it wrote.
+  int _softCorrect(_AudioChunk chunk, int errorUs, int outputTimeUs, int rate,
+      int channels, Int16List out, int frames) {
+    while (_recentCorrections.isNotEmpty &&
+        _recentCorrections.first.$1 <= outputTimeUs - speedWindowUs) {
+      _recentCorrections.removeFirst();
+    }
+    final spent = _recentCorrections.fold<int>(0, (sum, c) => sum + c.$2);
+    final allowance =
+        (maxSpeedDeviation * speedWindowUs * rate / 1000000).floor() - spent;
+    final step = (_correctionStepUs * rate / 1000000).round();
+    final needed = (errorUs.abs() * rate / 1000000).round();
+
+    var n = step < 1 ? 1 : step;
+    if (n > needed) n = needed;
+    if (n > allowance) n = allowance;
+    if (n <= 0) return 0;
+
+    if (errorUs > 0) {
+      // Late: let the neighbouring frames abut. Keep at least one frame.
+      if (n >= chunk.remaining) n = chunk.remaining - 1;
+      if (n <= 0) return 0;
+      chunk.offset += n;
+      _bufferedUs -= (n * 1000000 / rate).round();
+      _framesDropped += n;
+      _recentCorrections.add((outputTimeUs, n));
+      return 0;
+    }
+    // Early: repeat the next frame n times, then carry on from it.
+    if (n >= frames) n = frames - 1;
+    if (n <= 0) return 0;
+    final source = chunk.offset * channels;
+    for (var i = 0; i < n; i++) {
+      out.setRange(i * channels, (i + 1) * channels, chunk.samples, source);
+    }
+    _framesInserted += n;
+    _recentCorrections.add((outputTimeUs, n));
+    return n;
+  }
+
+  /// Discards all buffered audio, e.g. on `stream/clear` or `stream/end`.
+  /// The next audio is aligned to the timeline from scratch.
   void flush() {
     _chunks.clear();
-    _totalSamples = 0;
-    _startupMet = startupBufferMs == 0;
-    _playbackAnchored = false;
-    _playbackPositionUs = 0;
-    _correctionAccumulator = 0.0;
+    _bufferedUs = 0;
+    _synced = false;
     _lastSyncErrorUs = 0;
-    _hasProducedAudio = false;
-    _inUnderrun = false;
-  }
-
-  /// Drop oldest chunks until the buffer is within [maxBufferMs].
-  void _trimToMax() {
-    final maxSamples = maxBufferMs * _samplesPerMs;
-    while (_totalSamples > maxSamples && _chunks.isNotEmpty) {
-      final oldest = _chunks.first;
-      _totalSamples -= oldest.remaining;
-      _chunks.remove(oldest);
-    }
+    _recentCorrections.clear();
   }
 }

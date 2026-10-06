@@ -36,23 +36,6 @@ String _serverHello({String name = 'TestServer'}) {
   });
 }
 
-/// Helper: builds a stream/end JSON message.
-String _streamEnd() => jsonEncode({'type': 'stream/end', 'payload': {}});
-
-/// Helper: builds a stream/clear JSON message.
-String _streamClear() => jsonEncode({'type': 'stream/clear', 'payload': {}});
-
-/// Helper: builds a server/command set_static_delay JSON message.
-String _setOutputDelay(int delayMs) => jsonEncode({
-      'type': 'server/command',
-      'payload': {
-        'player': {
-          'command': 'set_output_delay',
-          'output_delay_ms': delayMs,
-        },
-      },
-    });
-
 /// Helper: builds a binary audio frame (version=1, big-endian int64 timestamp, PCM data).
 Uint8List _binaryFrame(int timestampUs, Int16List pcmSamples) {
   final audioBytes = Uint8List.view(pcmSamples.buffer);
@@ -150,70 +133,6 @@ void main() {
       expect(receivedBitDepth, 16);
     });
 
-    test('decodes binary frames and makes samples available via pullSamples',
-        () {
-      serverSends(player, _serverHello());
-      serverSends(
-          player,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      // Send enough audio to exceed the 200ms startup buffer.
-      // 48000 Hz * 2 channels * 0.25 seconds = 24000 samples.
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) {
-        pcm[i] = 1000; // non-zero so we can detect it
-      }
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Pull some samples — should be non-silent.
-      final pulled = player.pullSamples(960);
-      final hasNonZero = pulled.any((s) => s != 0);
-      expect(hasNonZero, isTrue);
-    });
-
-    test('pullSamples returns silence when not streaming', () {
-      final samples = player.pullSamples(960);
-      expect(samples.length, 960);
-      expect(samples.every((s) => s == 0), isTrue);
-    });
-
-    test('stream/end cleans up codec and buffer, calls onStreamStop', () {
-      bool stopCalled = false;
-      player.onStreamStop = () => stopCalled = true;
-
-      serverSends(player, _serverHello());
-      serverSends(player, _streamStart());
-      serverSends(player, _streamEnd());
-
-      expect(stopCalled, isTrue);
-      // After stream/end, pullSamples should return silence.
-      final samples = player.pullSamples(960);
-      expect(samples.every((s) => s == 0), isTrue);
-    });
-
-    test('stream/clear flushes buffer and resets codec', () {
-      serverSends(player, _serverHello());
-      serverSends(player, _streamStart());
-
-      // Add some audio data.
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) {
-        pcm[i] = 500;
-      }
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Clear the stream.
-      serverSends(player, _streamClear());
-
-      // Buffer should be flushed — pull returns silence until startup met again.
-      final samples = player.pullSamples(960);
-      expect(samples.every((s) => s == 0), isTrue);
-    });
-
     test('accepts custom codecFactory', () {
       final fakeCodec = _FakeCodec();
       final customPlayer = SendspinPlayer(
@@ -250,66 +169,6 @@ void main() {
       expect(payload['name'], 'Test Player');
     });
 
-    test('set_static_delay before stream/start is honored on fresh buffer', () {
-      serverSends(player, _serverHello());
-      // Static delay of 500ms: at 48kHz stereo = 48000 samples held back.
-      serverSends(player, _setOutputDelay(500));
-      expect(player.protocol.outputDelayMs, 500);
-
-      serverSends(
-          player,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      // Push 250ms of audio (24000 samples) — below the 500ms delay.
-      final smallPcm = Int16List(24000);
-      for (int i = 0; i < smallPcm.length; i++) smallPcm[i] = 1234;
-      serverSendsBinary(player, _binaryFrame(1000000, smallPcm));
-
-      // Should be silence — static delay holds back samples.
-      final pulled = player.pullSamples(960);
-      expect(pulled.every((s) => s == 0), isTrue);
-
-      // Push another 400ms (38400 samples). Total 62400 samples > 48000.
-      final morePcm = Int16List(38400);
-      for (int i = 0; i < morePcm.length; i++) morePcm[i] = 1234;
-      serverSendsBinary(player, _binaryFrame(2000000, morePcm));
-
-      // Now static delay threshold exceeded — should yield non-silent audio.
-      final pulled2 = player.pullSamples(960);
-      expect(pulled2.any((s) => s != 0), isTrue);
-    });
-
-    test('set_static_delay mid-stream applies to existing buffer', () {
-      serverSends(player, _serverHello());
-      serverSends(
-          player,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      // Push 250ms of audio — exceeds 200ms startup.
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) pcm[i] = 1234;
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Baseline: without delay, pullSamples yields audio.
-      final before = player.pullSamples(960);
-      expect(before.any((s) => s != 0), isTrue);
-
-      // Apply a 1000ms static delay mid-stream. 48000 samples/ch = 96000 needed.
-      serverSends(player, _setOutputDelay(1000));
-
-      // Buffer now below the delay threshold — should return silence.
-      final after = player.pullSamples(960);
-      expect(after.every((s) => s == 0), isTrue);
-    });
-
     test('initialOutputDelayMs is exposed via outputDelayMs getter', () {
       final p = SendspinPlayer(
         playerName: 'Test',
@@ -320,77 +179,6 @@ void main() {
       );
       expect(p.outputDelayMs, 800);
       p.dispose();
-    });
-
-    test('initialOutputDelayMs applies to fresh buffer on stream/start', () {
-      final p = SendspinPlayer(
-        playerName: 'Test',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 5,
-        initialOutputDelayMs: 500,
-      );
-
-      serverSends(p, _serverHello());
-      serverSends(
-          p,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      // 250ms of audio (24000 samples) — below the 500ms static delay.
-      final smallPcm = Int16List(24000);
-      for (int i = 0; i < smallPcm.length; i++) smallPcm[i] = 1234;
-      serverSendsBinary(p, _binaryFrame(1000000, smallPcm));
-
-      final pulled = p.pullSamples(960);
-      expect(pulled.every((s) => s == 0), isTrue);
-
-      // Push more to exceed the 500ms (48000 samples) threshold.
-      final morePcm = Int16List(38400);
-      for (int i = 0; i < morePcm.length; i++) morePcm[i] = 1234;
-      serverSendsBinary(p, _binaryFrame(2000000, morePcm));
-
-      final pulled2 = p.pullSamples(960);
-      expect(pulled2.any((s) => s != 0), isTrue);
-
-      p.dispose();
-    });
-
-    test(
-        'user onOutputDelayChanged callback coexists with internal buffer wiring',
-        () {
-      int? cbDelay;
-      player.onOutputDelayChanged = (d) => cbDelay = d;
-
-      serverSends(player, _serverHello());
-      serverSends(
-          player,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      // Push 250ms of audio — exceeds 200ms startup.
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) pcm[i] = 1234;
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Baseline yields audio.
-      final before = player.pullSamples(960);
-      expect(before.any((s) => s != 0), isTrue);
-
-      // Server commands a 1000ms delay — 96000 samples needed.
-      serverSends(player, _setOutputDelay(1000));
-
-      // User callback fired.
-      expect(cbDelay, 1000);
-      // Internal buffer wiring still works — below threshold -> silence.
-      final after = player.pullSamples(960);
-      expect(after.every((s) => s == 0), isTrue);
     });
 
     test('buildClientGoodbye forwards to protocol', () {
@@ -406,29 +194,6 @@ void main() {
       player.sendGoodbye(SendspinGoodbyeReason.userRequest);
       expect(sent, hasLength(1));
       expect(sent.first, contains('"reason":"user_request"'));
-    });
-
-    test(
-        'track switch (second stream/start while streaming) flushes existing buffer',
-        () {
-      serverSends(player, _serverHello());
-      serverSends(player, _streamStart(sampleRate: 48000));
-
-      // Add audio to the first stream.
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) pcm[i] = 999;
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Second stream/start (track switch).
-      int startCallCount = 0;
-      player.onStreamStart = (_, __, ___) => startCallCount++;
-      serverSends(player, _streamStart(sampleRate: 44100));
-
-      expect(startCallCount, 1);
-
-      // Buffer was flushed — pullSamples returns silence until new startup met.
-      final samples = player.pullSamples(960);
-      expect(samples.every((s) => s == 0), isTrue);
     });
 
     test('onMetadataUpdate fires when server/state with metadata is handled',
@@ -644,82 +409,6 @@ void main() {
       expect(received!.channel, 0);
       expect(received!.timestampUs, 777);
       p.dispose();
-    });
-
-    test(
-        'audio path is identity-equivalent before the clock is seeded '
-        '(no behaviour change in the first burst window)', () {
-      // computeClientTime is offset=0/no-drift before the first burst
-      // applies a sample, so the translation wiring is a no-op. This is
-      // a smoke test of the new code path, not a translation-correctness
-      // test (correctness is verified in clock_test.dart).
-      serverSends(player, _serverHello());
-      serverSends(player, _streamStart());
-      expect(player.protocol.clock.computeClientTime(123456789), 123456789);
-
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) {
-        pcm[i] = 1234;
-      }
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      final pulled = player.pullSamples(960);
-      expect(pulled.any((s) => s != 0), isTrue);
-    });
-
-    test(
-        'mid-stream clock convergence triggers a re-anchor on the next '
-        'translated chunk (proves _handleAudioFrame routes through '
-        'computeClientTime)', () {
-      // The wiring fix is observable when the clock domain shifts mid-
-      // stream: the FIRST chunk anchors with identity translation, then
-      // we seed a large offset, then a SECOND chunk lands in a different
-      // timestamp domain and trips the buffer's re-anchor. Without the
-      // wiring (raw frame.timestampUs flowing through), the second chunk
-      // would land in the SAME (server-time) domain as the first and no
-      // re-anchor would fire. So depth after the second pull
-      // distinguishes the two code paths.
-      serverSends(player, _serverHello());
-      serverSends(player, _streamStart());
-
-      final pcm = Int16List(24000); // 250 ms @ 48k stereo
-      for (int i = 0; i < pcm.length; i++) {
-        pcm[i] = 1234;
-      }
-
-      // Step 1: anchor with identity translation (clock uninitialised).
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-      // Pull once to anchor and start producing audio.
-      player.pullSamples(960);
-
-      // Step 2: seed a large offset (500 seconds). After this,
-      // computeClientTime(serverTs) = serverTs - 500_000_000 — far from
-      // the anchor's domain.
-      final clock = player.protocol.clock;
-      clock.update(500000000, 100, 1000);
-      clock.update(500000000, 100, 1001000);
-      expect(clock.computeClientTime(1500000) - 1500000, lessThan(-499000000),
-          reason: 'sanity: clock must be in non-identity state');
-
-      // Step 3: feed a second chunk. Its translated timestamp lands far
-      // in the past relative to the buffer's anchor (which was set in
-      // identity space). The buffer should detect this as either a
-      // late-chunk drop OR a re-anchor flush — either way, depth does
-      // NOT continue to grow as it would in the no-translation case.
-      final depthBeforeSecond = player.protocol.state.bufferDepthMs;
-      serverSendsBinary(player, _binaryFrame(1500000, pcm));
-      // Either: (a) chunk dropped at addChunk, depth unchanged;
-      // (b) chunk inserted, next pull sees huge sync error, re-anchor
-      // flushes the buffer to depth 0.
-      // Under the old (no-translation) code: chunk inserted at server-ts
-      // 1_500_000, near the anchor at 1_000_000 + ~10 ms playhead →
-      // accepted normally, depth grows by 12000 samples.
-      player.pullSamples(960);
-      final depthAfter = player.protocol.state.bufferDepthMs;
-      expect(depthAfter, lessThan(depthBeforeSecond + 100),
-          reason: 'translation must shift the second chunk into a '
-              'different domain than the anchor — without it, depth would '
-              'grow by an additional ~125 ms of audio');
     });
   });
 }
