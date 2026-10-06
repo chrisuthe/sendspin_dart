@@ -30,6 +30,11 @@ class SendspinPlayer {
   /// Called when audio streaming ends.
   void Function()? onStreamStop;
 
+  /// Called when a `stream/start` cannot be played: no codec could be built
+  /// for its format, or its codec header could not be decoded. The stream's
+  /// audio is discarded until a usable `stream/start` arrives.
+  void Function(Object error)? onStreamError;
+
   /// Optional factory for creating codecs. If it returns null or is not set,
   /// the built-in [createCodec] is used as a fallback.
   final SendspinCodec? Function(
@@ -250,6 +255,12 @@ class SendspinPlayer {
   /// The buffer returns exactly the audio that is due then, so that delay is
   /// compensated here and must not be included in the output delay.
   ///
+  /// The value does not need to be smooth from call to call: it is followed
+  /// by a loop that rejects callback scheduling noise and tracks the output
+  /// device's actual rate. It does need to be unbiased, so pass the best
+  /// estimate available (for ALSA, `nowUs()` plus `snd_pcm_delay` converted
+  /// to time).
+  ///
   /// Returns silence when not streaming, before the clock is synchronized,
   /// and for any part of the request no audio is due for.
   Int16List pullSamples(int count, {required int outputTimeUs}) {
@@ -318,21 +329,30 @@ class SendspinPlayer {
     _codec?.dispose();
     _codec = null;
 
-    // Try custom factory first, then fall back to built-in.
-    if (codecFactory != null) {
-      _codec = codecFactory!(
-          config.codec, config.bitDepth, config.channels, config.sampleRate);
-    }
-    _codec ??= createCodec(
-      codec: config.codec,
-      bitDepth: config.bitDepth,
-      channels: config.channels,
-      sampleRate: config.sampleRate,
-    );
-
-    // If codec header is present, push it through the codec (e.g. FLAC STREAMINFO).
-    if (config.codecHeader != null) {
-      _codec!.decode(_base64Decode(config.codecHeader!));
+    // Try custom factory first, then fall back to built-in. The format
+    // comes from the server, so failing to build a codec for it is reported
+    // rather than thrown out of the message handler.
+    try {
+      if (codecFactory != null) {
+        _codec = codecFactory!(
+            config.codec, config.bitDepth, config.channels, config.sampleRate);
+      }
+      _codec ??= createCodec(
+        codec: config.codec,
+        bitDepth: config.bitDepth,
+        channels: config.channels,
+        sampleRate: config.sampleRate,
+      );
+      // If codec header is present, push it through the codec (e.g. FLAC
+      // STREAMINFO).
+      if (config.codecHeader != null) {
+        _codec!.decode(_base64Decode(config.codecHeader!));
+      }
+    } catch (error) {
+      _codec?.dispose();
+      _codec = null;
+      onStreamError?.call(error);
+      return;
     }
 
     final updatesRunningStream = _buffer != null;

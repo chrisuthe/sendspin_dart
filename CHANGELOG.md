@@ -75,6 +75,14 @@ protocol. It cannot talk to pre-rc1 servers.
   where the new format takes effect.
 - Chunks that arrive after their time has passed are dropped; a missing
   chunk becomes silence of the same length.
+- The reported output time is followed by a delay-locked loop rather than
+  taken literally, so the scheduling noise of a real audio callback
+  (`nowUs() + latency`) is not mistaken for sync error, while a steady rate
+  difference between the output device and the local clock is still tracked
+  and corrected. A jump of more than 5 ms is treated as a discontinuity.
+- A `stream/start` with an unusable format is ignored, and a codec that
+  cannot be built is reported through the new `onStreamError` instead of
+  throwing out of the message handler.
 - `pullSamples` returns silence until the time filter is synchronized.
 - New on `SendspinPlayer`: `nowUs()`, `syncErrorUs`, `framesDropped`,
   `framesInserted`, `resyncCount`, `lateChunksDropped`, and a `now` clock
