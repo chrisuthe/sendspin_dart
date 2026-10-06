@@ -231,14 +231,14 @@ void main() {
     });
 
     test('parseBinaryFrame extracts timestamp and data', () {
-      final frame = Uint8List(13);
+      final frame = Uint8List(17);
       final view = ByteData.view(frame.buffer);
       frame[0] = 4;
       view.setInt64(1, 123456789, Endian.big);
-      frame[9] = 0x01;
-      frame[10] = 0x02;
-      frame[11] = 0x03;
-      frame[12] = 0x04;
+      frame[13] = 0x01;
+      frame[14] = 0x02;
+      frame[15] = 0x03;
+      frame[16] = 0x04;
       final result = SendspinClient.parseBinaryFrame(frame);
       expect(result.timestampUs, 123456789);
       expect(result.audioData, [0x01, 0x02, 0x03, 0x04]);

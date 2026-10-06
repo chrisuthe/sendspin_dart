@@ -236,29 +236,45 @@ void main() {
       AudioFrame? receivedFrame;
       protocol.onAudioFrame = (frame) => receivedFrame = frame;
 
-      final data = Uint8List(13);
+      final data = Uint8List(17);
       final view = ByteData.view(data.buffer);
-      data[0] = 4; // message type: player audio frame
+      data[0] = 4; // message type: player audio chunk
       view.setInt64(1, 123456789, Endian.big);
-      data[9] = 0x01;
-      data[10] = 0x02;
-      data[11] = 0x03;
-      data[12] = 0x04;
+      view.setUint32(9, 250000, Endian.big);
+      data[13] = 0x01;
+      data[14] = 0x02;
+      data[15] = 0x03;
+      data[16] = 0x04;
 
       protocol.handleBinaryMessage(data);
 
       expect(receivedFrame, isNotNull);
       expect(receivedFrame!.timestampUs, 123456789);
+      expect(receivedFrame!.sendAheadUs, 250000);
       expect(receivedFrame!.audioData, [0x01, 0x02, 0x03, 0x04]);
     });
 
-    test('ignores binary messages shorter than 9 bytes', () {
+    test('rejects audio chunks shorter than the 13-byte header', () {
       AudioFrame? receivedFrame;
       protocol.onAudioFrame = (frame) => receivedFrame = frame;
 
-      protocol.handleBinaryMessage(Uint8List(8));
+      final data = Uint8List(12);
+      data[0] = 4;
+      protocol.handleBinaryMessage(data);
 
       expect(receivedFrame, isNull);
+    });
+
+    test('accepts an audio chunk that is exactly the 13-byte header', () {
+      AudioFrame? receivedFrame;
+      protocol.onAudioFrame = (frame) => receivedFrame = frame;
+
+      final data = Uint8List(13);
+      data[0] = 4;
+      protocol.handleBinaryMessage(data);
+
+      expect(receivedFrame, isNotNull);
+      expect(receivedFrame!.audioData, isEmpty);
     });
 
     test('emits onStreamClear on stream/clear', () {
@@ -360,17 +376,19 @@ void main() {
     });
 
     test('parseBinaryFrame is a static utility', () {
-      final frame = Uint8List(13);
+      final frame = Uint8List(17);
       final view = ByteData.view(frame.buffer);
       frame[0] = 4;
       view.setInt64(1, 987654321, Endian.big);
-      frame[9] = 0xAA;
-      frame[10] = 0xBB;
-      frame[11] = 0xCC;
-      frame[12] = 0xDD;
+      view.setUint32(9, 0xFFFFFFFF, Endian.big);
+      frame[13] = 0xAA;
+      frame[14] = 0xBB;
+      frame[15] = 0xCC;
+      frame[16] = 0xDD;
 
       final result = SendspinProtocol.parseBinaryFrame(frame);
       expect(result.timestampUs, 987654321);
+      expect(result.sendAheadUs, 0xFFFFFFFF);
       expect(result.audioData, [0xAA, 0xBB, 0xCC, 0xDD]);
     });
 
@@ -715,10 +733,10 @@ void main() {
     });
 
     Uint8List buildTypedFrame(int type, int timestampUs, List<int> payload) {
-      final frame = Uint8List(9 + payload.length);
+      final frame = Uint8List(13 + payload.length);
       frame[0] = type;
       ByteData.view(frame.buffer).setInt64(1, timestampUs, Endian.big);
-      frame.setRange(9, frame.length, payload);
+      frame.setRange(13, frame.length, payload);
       return frame;
     }
 
@@ -738,12 +756,13 @@ void main() {
       expect(received!.type, 4);
     });
 
-    test('handleBinaryMessage emits onAudioFrame for player type 7', () {
+    test('handleBinaryMessage does not decode player IDs 5-7 as audio', () {
       AudioFrame? received;
       protocol.onAudioFrame = (f) => received = f;
-      protocol.handleBinaryMessage(buildTypedFrame(7, 1, [0x01]));
-      expect(received, isNotNull);
-      expect(received!.type, 7);
+      for (final id in [5, 6, 7]) {
+        protocol.handleBinaryMessage(buildTypedFrame(id, 1, [0x01]));
+      }
+      expect(received, isNull);
     });
 
     test('handleBinaryMessage drops artwork frame type 8', () {
@@ -1765,7 +1784,9 @@ void main() {
       p.onAudioFrame = (f) => audioReceived = f;
       p.onArtworkFrame = (f) => artworkReceived = f;
 
-      p.handleBinaryMessage(buildTypedFrame(4, 100, [0x01, 0x02]));
+      // Audio chunks carry the 13-byte rc1 header (4 extra send_ahead bytes).
+      p.handleBinaryMessage(
+          buildTypedFrame(4, 100, [0x00, 0x00, 0x00, 0x00, 0x01, 0x02]));
       p.handleBinaryMessage(buildTypedFrame(8, 200, [0xFF, 0xD8]));
 
       expect(audioReceived, isNotNull);
