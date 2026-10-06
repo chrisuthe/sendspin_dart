@@ -7,12 +7,15 @@ import 'dart:typed_data';
 String base64UrlNoPad(List<int> bytes) =>
     base64Url.encode(bytes).replaceAll('=', '');
 
-/// Decodes unpadded base64url, or returns null if [text] is not valid.
+/// Decodes unpadded base64url, or returns null if [text] is not exactly
+/// that: the standard alphabet (`+`, `/`), any padding, and non-canonical
+/// trailing bits are all rejected, so one value has one accepted spelling.
 Uint8List? base64UrlNoPadDecode(String text) {
-  if (text.contains('=')) return null;
+  final Uint8List bytes;
   try {
-    return base64Url.decode(base64Url.normalize(text));
+    bytes = base64Url.decode(base64Url.normalize(text));
   } on FormatException {
     return null;
   }
+  return base64UrlNoPad(bytes) == text ? bytes : null;
 }

@@ -21,6 +21,9 @@ class NoiseError implements Exception {
 const int _keyLength = 32;
 const int _tagLength = 16;
 
+/// The Noise limit on any handshake or transport message.
+const int _maxMessageLength = 65535;
+
 const DartSha256 _sha256 = DartSha256();
 const DartHmac _hmac = DartHmac(DartSha256());
 const DartX25519 _x25519 = DartX25519();
@@ -67,8 +70,13 @@ class _CipherState {
   _CipherState copy() => _CipherState(key)..nonce = nonce;
 
   // ChaChaPoly nonce: 32 zero bits followed by the little-endian counter.
-  Uint8List _nonceBytes() =>
-      Uint8List(12)..buffer.asByteData().setUint64(4, nonce, Endian.little);
+  // The counter value 2^64-1 (-1 as a 64-bit int) is reserved by Noise and
+  // must never be used, which also keeps the counter from wrapping.
+  Uint8List _nonceBytes() {
+    if (nonce == -1) throw const NoiseError('nonce exhausted');
+    return Uint8List(12)
+      ..buffer.asByteData().setUint64(4, nonce, Endian.little);
+  }
 
   Uint8List encrypt(List<int> ad, List<int> plaintext) {
     final k = key;
@@ -88,6 +96,9 @@ class _CipherState {
     if (k == null) return Uint8List.fromList(ciphertext);
     if (ciphertext.length < _tagLength) {
       throw const NoiseError('message shorter than the AEAD tag');
+    }
+    if (ciphertext.length > _maxMessageLength) {
+      throw const NoiseError('message exceeds the Noise size limit');
     }
     final split = ciphertext.length - _tagLength;
     final List<int> plaintext;
@@ -296,8 +307,9 @@ class NoiseHandshake {
   /// Responder: reads `-> e, es, ss` and returns its payload.
   Uint8List readMessage1(Uint8List message) {
     _expect(false, _Step.message1);
-    if (message.length < _keyLength + _tagLength) {
-      throw const NoiseError('handshake message 1 is too short');
+    if (message.length < _keyLength + _tagLength ||
+        message.length > _maxMessageLength) {
+      throw const NoiseError('handshake message 1 has an invalid length');
     }
     // Work on a copy so a message that fails to authenticate leaves the
     // handshake untouched.
@@ -337,8 +349,9 @@ class NoiseHandshake {
   Uint8List readMessage2(Uint8List message, Uint8List psk) {
     _expect(true, _Step.message2);
     _checkPsk(psk);
-    if (message.length < _keyLength + _tagLength) {
-      throw const NoiseError('handshake message 2 is too short');
+    if (message.length < _keyLength + _tagLength ||
+        message.length > _maxMessageLength) {
+      throw const NoiseError('handshake message 2 has an invalid length');
     }
     final state = _state.copy();
     final remoteEphemeral = Uint8List.sublistView(message, 0, _keyLength);

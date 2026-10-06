@@ -424,6 +424,177 @@ void main() {
     });
   });
 
+  group('SendspinChannel hostile input', () {
+    test('a server_id in the standard base64 alphabet is rejected', () {
+      final link = _Link(connectToServer: false);
+      link.channel.start();
+      final id = FakeServer().serverId;
+      // Same key bytes, but '+' and '/' in place of '-' and '_'.
+      final nonCanonical = id.replaceAll('-', '+').replaceAll('_', '/');
+      expect(nonCanonical, isNot(id), reason: 'test needs a - or _ in the id');
+      link.channel.handleText(jsonEncode({
+        'type': 'server/init',
+        'payload': {'server_id': nonCanonical, 'version': 1},
+      }));
+      expect(link.closes, hasLength(1));
+    });
+
+    test('a server_id with encoded padding is rejected', () {
+      final link = _Link(connectToServer: false);
+      link.channel.start();
+      link.channel.handleText(jsonEncode({
+        'type': 'server/init',
+        'payload': {'server_id': '${FakeServer().serverId}%3D', 'version': 1},
+      }));
+      expect(link.closes, hasLength(1));
+    });
+
+    test('a floating-point version is rejected', () {
+      final link = _Link(connectToServer: false);
+      link.channel.start();
+      link.channel.handleText('{"type":"server/init","payload":'
+          '{"server_id":"${FakeServer().serverId}","version":1.0}}');
+      expect(link.closes, hasLength(1));
+    });
+
+    test('a transport message over the Noise size limit closes silently', () {
+      final link = _Link();
+      link.channel.start();
+      link.sentBinary.clear();
+      link.channel.handleBinary(Uint8List(65536));
+      expect(link.closes, hasLength(1));
+      expect(link.json, isEmpty);
+      expect(link.sentBinary, isEmpty);
+    });
+
+    test('a PSK lookup that throws fails the handshake instead of escaping',
+        () {
+      final link = _Link(
+        server: FakeServer(psk: _key(1), pskCategory: 'lt'),
+        pskCandidates: () => throw StateError('store unavailable'),
+      );
+      link.channel.start();
+      expect(link.closes, hasLength(1));
+      expect(link.handshakes, isEmpty);
+    });
+
+    test('a PSK candidate must be 32 bytes', () {
+      expect(() => SendspinPskCandidate.pairing(Uint8List(16)),
+          throwsArgumentError);
+      expect(
+          () =>
+              SendspinPskCandidate.longTerm(psk: Uint8List(33), serverId: 'x'),
+          throwsArgumentError);
+    });
+
+    test('the reported PSK is a copy, and the Sentinel cannot be modified', () {
+      final link = _Link();
+      link.channel.start();
+      final matched = link.handshakes.single.matchedPsk;
+      expect(matched, sentinelPsk);
+      matched[0] ^= 0xFF;
+      expect(link.handshakes.single.matchedPsk, isNot(sentinelPsk),
+          reason: 'the result owns its copy');
+      expect(() => sentinelPsk[0] = 0, throwsUnsupportedError);
+    });
+
+    test('sendBinary refuses an empty message or a raw fragment', () {
+      final link = _Link();
+      link.channel.start();
+      expect(() => link.channel.sendBinary(Uint8List(0)), throwsArgumentError);
+      expect(() => link.channel.sendBinary(Uint8List.fromList([1, 3, 4])),
+          throwsArgumentError);
+    });
+  });
+
+  group('SendspinChannel re-entrancy', () {
+    test('a failure during the handshake reply does not revive the channel',
+        () {
+      // The transport delivers a binary message from inside the callback
+      // that sends Noise message 2.
+      final link = _Link();
+      final forward = link.channel.onSendText!;
+      link.channel.onSendText = (text) {
+        forward(text);
+        if (text.contains('noise/handshake')) {
+          link.channel.handleBinary(Uint8List(40));
+        }
+      };
+      link.channel.start();
+
+      expect(link.closes, hasLength(1));
+      expect(link.channel.isEstablished, isFalse);
+    });
+
+    test('the activation after a re-handshake may arrive inside the send', () {
+      final pairing = _key(2);
+      final link =
+          _Link(pskCandidates: () => [SendspinPskCandidate.pairing(pairing)]);
+      link.channel.start();
+
+      // A synchronous transport: the server answers message 2 with its first
+      // message under the new keys before the client's send call returns.
+      final forward = link.channel.onSendBinary!;
+      List<String>? orderWhenActivated;
+      link.channel.onJson = (m) {
+        orderWhenActivated ??= List.of(link.events);
+        link.json.add(m);
+      };
+      var answered = false;
+      link.channel.onSendBinary = (data) {
+        forward(data);
+        if (!answered) {
+          answered = true;
+          link.server.sendJson('server/activate', {'activities': []});
+        }
+      };
+      link.server.startRehandshake(pairing, 'pr');
+
+      expect(link.closes, isEmpty);
+      expect(link.json.single['type'], 'server/activate');
+      expect(link.channel.isEstablished, isTrue);
+      // The new keys were reported before the activation was delivered.
+      expect(link.handshakes.last.matchedCategory, SendspinPskCategory.pairing);
+      expect(orderWhenActivated,
+          ['handshake', 'rehandshake-started', 'rehandshake-complete']);
+    });
+
+    test('reset from the send callback leaves the channel reset', () {
+      final link = _Link();
+      final forward = link.channel.onSendText!;
+      link.channel.onSendText = (text) {
+        forward(text);
+        if (text.contains('noise/handshake')) link.channel.reset();
+      };
+      link.channel.start();
+      expect(link.channel.isEstablished, isFalse);
+    });
+
+    test('reset from onRehandshakeStarted does not throw', () {
+      final pairing = _key(2);
+      final link =
+          _Link(pskCandidates: () => [SendspinPskCandidate.pairing(pairing)]);
+      link.channel.start();
+      link.channel.onRehandshakeStarted = link.channel.reset;
+      link.server.startRehandshake(pairing, 'pr');
+      expect(link.channel.isEstablished, isFalse);
+      expect(link.closes, isEmpty);
+    });
+
+    test('reset from onServerError is not undone', () {
+      final link = _Link(connectToServer: false);
+      link.channel.onServerError = (_) => link.channel.reset();
+      link.channel.start();
+      link.channel.handleText(jsonEncode({
+        'type': 'server/error',
+        'payload': {'reason': 'malformed'},
+      }));
+      // The channel is idle again, so a new connection can start.
+      link.channel.start();
+      expect(link.sentText, hasLength(2));
+    });
+  });
+
   group('SendspinChannel lifecycle', () {
     test('sending before transport mode is an error', () {
       final channel = SendspinChannel(identity: testIdentity);
