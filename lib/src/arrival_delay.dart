@@ -29,7 +29,9 @@ class ArrivalDelayTracker {
     this.windowUs = 10 * 1000 * 1000,
     this.historyWindows = 6,
     this.stepMs = 10,
-  });
+  })  : assert(windowUs > 0, 'windowUs must be positive'),
+        assert(historyWindows > 0, 'historyWindows must be positive'),
+        assert(stepMs > 0, 'stepMs must be positive');
 
   /// The debounced value to report as `min_buffer_ms`, or null until one full
   /// window of samples has been observed.
