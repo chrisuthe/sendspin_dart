@@ -24,6 +24,22 @@ class _MemoryStore implements SendspinIdentityStore {
   }
 }
 
+/// A store whose reads and writes complete on a later event-loop turn, so
+/// two callers can interleave.
+class _SlowStore extends _MemoryStore {
+  @override
+  Future<Uint8List?> loadPrivateKey() async {
+    await Future<void>.delayed(Duration.zero);
+    return stored;
+  }
+
+  @override
+  Future<void> savePrivateKey(Uint8List privateKey) async {
+    await Future<void>.delayed(Duration.zero);
+    return super.savePrivateKey(privateKey);
+  }
+}
+
 /// A [Random] that hands out a fixed byte sequence, to pin key generation.
 class _FixedRandom implements Random {
   final List<int> bytes;
@@ -109,6 +125,21 @@ void main() {
       final first = await SendspinIdentity.loadOrCreate(store);
       final second = await SendspinIdentity.loadOrCreate(store);
       expect(second.clientId, first.clientId);
+      expect(store.saves, 1);
+    });
+
+    test('overlapping calls on an empty store yield one identity', () async {
+      final store = _SlowStore();
+      final results = await Future.wait([
+        SendspinIdentity.loadOrCreate(store),
+        SendspinIdentity.loadOrCreate(store),
+      ]);
+      expect(results[0].clientId, results[1].clientId);
+      expect(store.saves, 1);
+
+      // The coalescing must not outlive the operation.
+      final later = await SendspinIdentity.loadOrCreate(store);
+      expect(later.clientId, results[0].clientId);
       expect(store.saves, 1);
     });
 
