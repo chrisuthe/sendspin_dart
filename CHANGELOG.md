@@ -17,6 +17,23 @@ protocol. It cannot talk to pre-rc1 servers.
 - New `SendspinClock.isSynchronized` (two samples and a finite variance).
 - `SendspinProtocol` accepts an optional `now` clock source.
 
+### server/state and group/update are full-state
+
+- Each `metadata` object in `server/state` now replaces the previous state
+  instead of being merged onto it. A field the server omits is absent, so an
+  omitted `progress` clears the position. `SendspinMetadata.mergeDelta` is
+  replaced by `SendspinMetadata.fromJson`.
+- Scheduled metadata updates: a `metadata` object whose `timestamp` is still
+  in the future (per the time filter's current estimate) is held as
+  `pendingMetadata` and applied when that moment is reached. A newer future
+  update replaces it; a past or present one discards it. `onMetadataUpdate`
+  fires when a state takes effect, not when it is received.
+- New `currentTrackPositionMs` extrapolates the position from the current
+  state only, never from the pending update.
+- `group/update` replaces the group state; `SendspinGroupState.mergeDelta` is
+  removed.
+- `resetForNewConnection` discards the metadata state and any pending update.
+
 ## 0.0.7
 
 ### server/state metadata delta semantics (BUGFIX)

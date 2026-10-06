@@ -852,7 +852,7 @@ void main() {
       expect(received!.groupName, 'Kitchen');
     });
 
-    test('group/update delta merges with existing state', () {
+    test('group/update replaces the previous group state', () {
       protocol.handleTextMessage(jsonEncode({
         'type': 'group/update',
         'payload': {
@@ -864,13 +864,17 @@ void main() {
 
       protocol.handleTextMessage(jsonEncode({
         'type': 'group/update',
-        'payload': {'playback_state': 'stopped'},
+        'payload': {
+          'playback_state': 'stopped',
+          'group_id': 'g2',
+          'group_name': 'Solo',
+        },
       }));
 
       expect(protocol.state.groupState.playbackState,
           SendspinGroupPlaybackState.stopped);
-      expect(protocol.state.groupState.groupId, 'g1');
-      expect(protocol.state.groupState.groupName, 'Kitchen');
+      expect(protocol.state.groupState.groupId, 'g2');
+      expect(protocol.state.groupState.groupName, 'Solo');
     });
 
     test('group/update with playback_state stopped', () {
@@ -1083,28 +1087,31 @@ void main() {
     });
     tearDown(() => p.dispose());
 
-    test(
-        'server/state with full metadata populates SendspinMetadata and invokes onMetadataUpdate',
-        () {
-      SendspinMetadata? received;
-      p.onMetadataUpdate = (m) => received = m;
+    void sendMetadata(Map<String, dynamic> metadata) {
       p.handleTextMessage(jsonEncode({
         'type': 'server/state',
-        'payload': {
-          'metadata': {
-            'timestamp': 123456789,
-            'title': 'Song',
-            'artist': 'Artist',
-            'album_artist': 'AA',
-            'album': 'Album',
-            'artwork_url': 'http://x/y.png',
-            'year': 2024,
-            'track': 3,
-            'repeat': 'one',
-            'shuffle': true,
-          },
-        },
+        'payload': {'metadata': metadata},
       }));
+    }
+
+    test('populates SendspinMetadata and invokes onMetadataUpdate', () {
+      SendspinMetadata? received;
+      p.onMetadataUpdate = (m) => received = m;
+      sendMetadata({
+        'timestamp': 0,
+        'title': 'Song',
+        'artist': 'Artist',
+        'album_artist': 'AA',
+        'album': 'Album',
+        'artwork_url': 'http://x/y.png',
+        'year': 2024,
+        'track': 3,
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 240000,
+          'playback_speed': 1000,
+        },
+      });
       expect(received, isNotNull);
       expect(received!.title, 'Song');
       expect(received!.artist, 'Artist');
@@ -1113,259 +1120,236 @@ void main() {
       expect(received!.artworkUrl, 'http://x/y.png');
       expect(received!.year, 2024);
       expect(received!.track, 3);
-      expect(received!.repeat, SendspinRepeatMode.one);
-      expect(received!.shuffle, true);
+      expect(received!.progress!.trackProgress, 5000);
+      expect(received!.progress!.trackDuration, 240000);
+      expect(received!.progress!.playbackSpeed, 1000);
       expect(p.state.metadata, same(received));
     });
 
-    test(
-        'server/state metadata with progress object populates SendspinMetadataProgress',
-        () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {
-            'progress': {
-              'track_progress': 5000,
-              'track_duration': 240000,
-              'playback_speed': 1000,
-            },
-          },
-        },
-      }));
-      final prog = p.state.metadata!.progress!;
-      expect(prog.trackProgress, 5000);
-      expect(prog.trackDuration, 240000);
-      expect(prog.playbackSpeed, 1000);
+    test('timestamp and year coerce from num', () {
+      sendMetadata({'timestamp': 0.0, 'year': 2024.0});
+      expect(p.state.metadata!.timestamp, 0);
+      expect(p.state.metadata!.year, 2024);
     });
 
-    test('server/state metadata with null title clears title', () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'title': null, 'artist': 'A'},
-        },
-      }));
-      expect(p.state.metadata!.title, isNull);
-      expect(p.state.metadata!.artist, 'A');
+    test('a later state replaces the previous one instead of merging', () {
+      sendMetadata({
+        'timestamp': 0,
+        'title': 'Song',
+        'artist': 'Artist',
+        'artwork_url': 'http://x/y.png',
+        'year': 2024,
+      });
+      sendMetadata({'timestamp': 1, 'title': 'Next'});
+
+      final m = p.state.metadata!;
+      expect(m.title, 'Next');
+      expect(m.artist, isNull, reason: 'omitted fields are absent in rc1');
+      expect(m.artworkUrl, isNull);
+      expect(m.year, isNull);
     });
 
-    test('server/state metadata repeat "all" parses correctly', () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'repeat': 'all'},
+    test('omitting progress clears the position', () {
+      sendMetadata({
+        'timestamp': 0,
+        'title': 'Song',
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 240000,
+          'playback_speed': 1000,
         },
-      }));
-      expect(p.state.metadata!.repeat, SendspinRepeatMode.all);
-    });
-
-    test('server/state metadata repeat null becomes unknown', () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'repeat': null},
-        },
-      }));
-      expect(p.state.metadata!.repeat, SendspinRepeatMode.unknown);
-    });
-
-    test('server/state metadata with no progress object leaves progress null',
-        () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'title': 'X'},
-        },
-      }));
+      });
+      sendMetadata({'timestamp': 1, 'title': 'Song'});
       expect(p.state.metadata!.progress, isNull);
+      expect(p.currentTrackPositionMs, isNull);
     });
 
-    test('server/state metadata timestamp and year coerce from num', () {
+    test('omitting the metadata object leaves the state unchanged', () {
+      sendMetadata({'timestamp': 0, 'title': 'Song'});
+      var calls = 0;
+      p.onMetadataUpdate = (_) => calls++;
       p.handleTextMessage(jsonEncode({
         'type': 'server/state',
         'payload': {
-          'metadata': {'timestamp': 1234.0, 'year': 2023.0, 'track': 2.0},
+          'controller': {
+            'supported_commands': ['play'],
+            'volume': 10,
+            'muted': false,
+          },
         },
       }));
-      expect(p.state.metadata!.timestamp, 1234);
-      expect(p.state.metadata!.year, 2023);
-      expect(p.state.metadata!.track, 2);
+      expect(p.state.metadata!.title, 'Song');
+      expect(calls, 0);
+    });
+  });
+
+  group('server/state scheduled metadata', () {
+    late int now;
+    late SendspinProtocol p;
+
+    setUp(() {
+      now = 1000000;
+      // The time filter starts as the identity mapping, so server timestamps
+      // are compared directly against the injected local clock.
+      p = SendspinProtocol(
+        playerName: 'T',
+        clientId: 'c',
+        bufferSeconds: 2,
+        now: () => now,
+      );
+    });
+    tearDown(() => p.dispose());
+
+    void sendMetadata(Map<String, dynamic> metadata) {
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': {'metadata': metadata},
+      }));
+    }
+
+    test('a past or present timestamp applies immediately', () {
+      sendMetadata({'timestamp': now, 'title': 'Now'});
+      expect(p.state.metadata!.title, 'Now');
+      expect(p.pendingMetadata, isNull);
     });
 
-    // -----------------------------------------------------------------
-    // Delta-encoding semantics (spec compliance):
-    //   absent → keep, null → clear, value → replace.
-    // The aiosendspin server emits metadata as a delta (UndefinedField
-    // sentinel + omit_default) so a partial `metadata` sub-object on the
-    // wire is the rule, not the exception. The pre-0.0.7 implementation
-    // did wholesale replacement and dropped fields the server didn't
-    // re-send — most visibly artwork_url disappearing on a progress
-    // update mid-track.
-    // -----------------------------------------------------------------
+    test('a future timestamp is held as the pending update', () {
+      sendMetadata({'timestamp': now - 1, 'title': 'Current'});
+      final applied = <String?>[];
+      p.onMetadataUpdate = (m) => applied.add(m.title);
 
-    test(
-      'absent fields preserve the existing snapshot value (artwork '
-      'survives a title-only update)',
-      () {
-        // Initial: full metadata.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {
-              'title': 'Old Title',
-              'artist': 'Old Artist',
-              'artwork_url': 'http://x/cover.png',
-            },
-          },
-        }));
-        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png');
+      sendMetadata({'timestamp': now + 5000000, 'title': 'Next'});
 
-        // Delta: title-only change. artwork_url is absent, must be kept.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {'title': 'New Title'},
-          },
-        }));
-        expect(p.state.metadata!.title, 'New Title');
-        expect(p.state.metadata!.artist, 'Old Artist',
-            reason: 'absent artist must keep prior value');
-        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png',
-            reason: 'absent artwork_url must keep prior value');
-      },
-    );
+      expect(p.state.metadata!.title, 'Current');
+      expect(p.pendingMetadata!.title, 'Next');
+      expect(applied, isEmpty);
+    });
 
-    test(
-      'explicit null clears the field (artwork transitions to none on '
-      "an explicit 'artwork_url': null)",
-      () {
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {
-              'title': 'Song',
-              'artwork_url': 'http://x/cover.png',
-            },
-          },
-        }));
-        expect(p.state.metadata!.artworkUrl, 'http://x/cover.png');
+    test('the pending update is applied when its time is reached', () async {
+      sendMetadata({'timestamp': now - 1, 'title': 'Current'});
+      final applied = <String?>[];
+      p.onMetadataUpdate = (m) => applied.add(m.title);
 
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {'artwork_url': null},
-          },
-        }));
-        expect(p.state.metadata!.title, 'Song',
-            reason: 'absent title must keep prior value');
-        expect(p.state.metadata!.artworkUrl, isNull,
-            reason: 'explicit null artwork_url must clear');
-      },
-    );
+      sendMetadata({'timestamp': now + 20000, 'title': 'Next'});
+      now += 20000;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
 
-    test(
-      'absent progress keeps prior progress; explicit null clears it',
-      () {
-        // Seed progress.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {
-              'progress': {
-                'track_progress': 1000,
-                'track_duration': 60000,
-                'playback_speed': 1000,
-              },
-            },
-          },
-        }));
-        expect(p.state.metadata!.progress, isNotNull);
+      expect(p.state.metadata!.title, 'Next');
+      expect(p.pendingMetadata, isNull);
+      expect(applied, ['Next']);
+    });
 
-        // Title-only delta: progress absent, must be kept.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {'title': 'X'},
-          },
-        }));
-        expect(p.state.metadata!.progress, isNotNull,
-            reason: 'absent progress must keep prior value');
+    test('a newer future update replaces the held one', () async {
+      sendMetadata({'timestamp': now + 20000, 'title': 'First'});
+      sendMetadata({'timestamp': now + 30000, 'title': 'Second'});
+      expect(p.pendingMetadata!.title, 'Second');
 
-        // Explicit null progress: cleared.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {'progress': null},
-          },
-        }));
-        expect(p.state.metadata!.progress, isNull,
-            reason: 'explicit null progress must clear');
-      },
-    );
+      now += 30000;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(p.state.metadata!.title, 'Second');
+    });
 
-    test(
-      'cleared_update (every field explicitly null) clears all metadata',
-      () {
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {
-              'title': 'Song',
-              'artist': 'Artist',
-              'artwork_url': 'http://x',
-              'repeat': 'one',
-            },
-          },
-        }));
-        expect(p.state.metadata!.title, 'Song');
+    test('an immediate update discards the held pending update', () async {
+      sendMetadata({'timestamp': now + 20000, 'title': 'Scheduled'});
+      sendMetadata({'timestamp': now, 'title': 'Cancelled it'});
+      expect(p.pendingMetadata, isNull);
 
-        // Mirror what aiosendspin's Metadata.cleared_update emits.
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': {
-            'metadata': {
-              'title': null,
-              'artist': null,
-              'album_artist': null,
-              'album': null,
-              'artwork_url': null,
-              'year': null,
-              'track': null,
-              'progress': null,
-              'repeat': null,
-              'shuffle': null,
-            },
-          },
-        }));
-        expect(p.state.metadata!.title, isNull);
-        expect(p.state.metadata!.artist, isNull);
-        expect(p.state.metadata!.artworkUrl, isNull);
-        expect(p.state.metadata!.repeat, SendspinRepeatMode.unknown);
-      },
-    );
+      now += 20000;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(p.state.metadata!.title, 'Cancelled it');
+    });
 
-    test('mergeDelta on the model directly is correct (unit-level)', () {
-      const initial = SendspinMetadata(
-        title: 'A',
-        artist: 'B',
-        artworkUrl: 'http://x',
-        repeat: SendspinRepeatMode.all,
-      );
-      final keep = initial.mergeDelta(<String, dynamic>{});
-      expect(keep.title, 'A');
-      expect(keep.artist, 'B');
-      expect(keep.artworkUrl, 'http://x');
-      expect(keep.repeat, SendspinRepeatMode.all);
+    test('omitting metadata leaves the pending update in place', () {
+      sendMetadata({'timestamp': now + 5000000, 'title': 'Next'});
+      p.handleTextMessage(jsonEncode({
+        'type': 'server/state',
+        'payload': <String, dynamic>{},
+      }));
+      expect(p.pendingMetadata!.title, 'Next');
+    });
 
-      final clearOne = initial.mergeDelta({'artwork_url': null});
-      expect(clearOne.title, 'A');
-      expect(clearOne.artworkUrl, isNull);
+    test('resetForNewConnection discards state and pending update', () async {
+      sendMetadata({'timestamp': now, 'title': 'Current'});
+      sendMetadata({'timestamp': now + 20000, 'title': 'Next'});
+      p.resetForNewConnection();
+      expect(p.state.metadata, isNull);
+      expect(p.pendingMetadata, isNull);
 
-      final replaceOne = initial.mergeDelta({'title': 'C'});
-      expect(replaceOne.title, 'C');
-      expect(replaceOne.artist, 'B');
-      expect(replaceOne.artworkUrl, 'http://x');
+      now += 20000;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(p.state.metadata, isNull);
+    });
+
+    test('the timestamp is translated through the time filter', () {
+      // server = client + 10 s, so a server timestamp 5 s ahead of the local
+      // clock value is actually 5 s in the past.
+      p.clock.update(10000000, 100, 1);
+      p.clock.update(10000000, 100, 2);
+      sendMetadata({'timestamp': now + 5000000, 'title': 'Past'});
+      expect(p.state.metadata!.title, 'Past');
+      expect(p.pendingMetadata, isNull);
+    });
+
+    test('position is extrapolated from the current state', () {
+      sendMetadata({
+        'timestamp': now,
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 240000,
+          'playback_speed': 1000,
+        },
+      });
+      now += 2000000;
+      expect(p.currentTrackPositionMs, 7000);
+    });
+
+    test('position honours playback speed and clamps to the duration', () {
+      sendMetadata({
+        'timestamp': now,
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 8000,
+          'playback_speed': 2000,
+        },
+      });
+      now += 1000000;
+      expect(p.currentTrackPositionMs, 7000);
+      now += 1000000;
+      expect(p.currentTrackPositionMs, 8000);
+    });
+
+    test('position is unbounded when the duration is unknown', () {
+      sendMetadata({
+        'timestamp': now,
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 0,
+          'playback_speed': 1000,
+        },
+      });
+      now += 10000000;
+      expect(p.currentTrackPositionMs, 15000);
+    });
+
+    test('position never extrapolates from the pending update', () {
+      sendMetadata({
+        'timestamp': now,
+        'progress': {
+          'track_progress': 5000,
+          'track_duration': 240000,
+          'playback_speed': 0,
+        },
+      });
+      sendMetadata({
+        'timestamp': now + 5000000,
+        'progress': {
+          'track_progress': 0,
+          'track_duration': 100000,
+          'playback_speed': 1000,
+        },
+      });
+      now += 1000000;
+      expect(p.currentTrackPositionMs, 5000);
     });
   });
 
@@ -1472,19 +1456,6 @@ void main() {
   });
 
   group('SendspinGroupState', () {
-    test('mergeDelta preserves fields not present in delta', () {
-      const base = SendspinGroupState(
-        playbackState: SendspinGroupPlaybackState.playing,
-        groupId: 'g1',
-        groupName: 'Kitchen',
-      );
-      final merged =
-          base.mergeDelta(const SendspinGroupState(groupName: 'Living Room'));
-      expect(merged.playbackState, SendspinGroupPlaybackState.playing);
-      expect(merged.groupId, 'g1');
-      expect(merged.groupName, 'Living Room');
-    });
-
     test('fresh SendspinPlayerState has empty default groupState', () {
       const s = SendspinPlayerState();
       expect(s.groupState.playbackState, isNull);

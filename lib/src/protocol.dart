@@ -133,6 +133,11 @@ class SendspinProtocol {
 
   Timer? _stateReportTimer;
 
+  /// A metadata state whose timestamp is still in the future. At most one is
+  /// held; [_pendingMetadataTimer] applies it when its time is reached.
+  SendspinMetadata? _pendingMetadata;
+  Timer? _pendingMetadataTimer;
+
   // -------------------------------------------------------------------------
   // Callbacks
   // -------------------------------------------------------------------------
@@ -166,12 +171,11 @@ class SendspinProtocol {
   /// Called when the server updates the static delay via server/command.
   void Function(int delayMs)? onStaticDelayChanged;
 
-  /// Called when a group/update message arrives. The argument is the
-  /// merged state after applying the delta.
+  /// Called when a group/update message arrives with the new group state.
   void Function(SendspinGroupState groupState)? onGroupUpdate;
 
-  /// Called when a server/state message updates the metadata sub-object.
-  /// The argument is the full new snapshot.
+  /// Called when a metadata state takes effect: immediately for a past or
+  /// present timestamp, or when a scheduled update's time is reached.
   void Function(SendspinMetadata metadata)? onMetadataUpdate;
 
   /// Called when a server/state message updates the controller sub-object.
@@ -240,6 +244,27 @@ class SendspinProtocol {
 
   /// Current static delay in milliseconds (set by server/command).
   int get staticDelayMs => _staticDelayMs;
+
+  /// The scheduled metadata update that has not taken effect yet, if any.
+  /// The current state is [SendspinPlayerState.metadata].
+  SendspinMetadata? get pendingMetadata => _pendingMetadata;
+
+  /// Current track position in milliseconds, extrapolated from the current
+  /// metadata state (never from [pendingMetadata]), or null when the server
+  /// reported no progress.
+  int? get currentTrackPositionMs {
+    final metadata = _state.metadata;
+    final progress = metadata?.progress;
+    if (metadata == null || progress == null) return null;
+    final serverNowUs = _clock.computeServerTime(nowUs());
+    final position = progress.trackProgress +
+        (serverNowUs - metadata.timestamp) * progress.playbackSpeed ~/ 1000000;
+    if (position < 0) return 0;
+    if (progress.trackDuration != 0 && position > progress.trackDuration) {
+      return progress.trackDuration;
+    }
+    return position;
+  }
 
   /// `min_buffer_ms` sized from measured audio-chunk arrival delay, or null
   /// until enough chunks have been observed.
@@ -457,25 +482,14 @@ class SendspinProtocol {
   }
 
   void _handleGroupUpdate(Map<String, dynamic> payload) {
-    SendspinGroupPlaybackState? newPlaybackState;
-    if (payload.containsKey('playback_state')) {
-      newPlaybackState = SendspinGroupPlaybackState.fromWire(
-          payload['playback_state'] as String?);
-    }
-
-    final delta = SendspinGroupState(
-      playbackState: newPlaybackState,
-      groupId: payload.containsKey('group_id')
-          ? payload['group_id'] as String?
-          : null,
-      groupName: payload.containsKey('group_name')
-          ? payload['group_name'] as String?
-          : null,
+    final groupState = SendspinGroupState(
+      playbackState: SendspinGroupPlaybackState.fromWire(
+          payload['playback_state'] as String?),
+      groupId: payload['group_id'] as String?,
+      groupName: payload['group_name'] as String?,
     );
-
-    final merged = _state.groupState.mergeDelta(delta);
-    _updateState(_state.copyWith(groupState: merged));
-    onGroupUpdate?.call(merged);
+    _updateState(_state.copyWith(groupState: groupState));
+    onGroupUpdate?.call(groupState);
   }
 
   void _handleServerHello(Map<String, dynamic> payload) {
@@ -595,34 +609,72 @@ class SendspinProtocol {
   }
 
   void _handleServerState(Map<String, dynamic> payload) {
-    // metadata is delta-encoded per the spec — merge field-by-field onto
-    // the existing snapshot, preserving fields the server did not send.
-    // controller is always a full snapshot (aiosendspin's
-    // ControllerStatePayload has no omit_none / omit_default config and
-    // all required non-nullable fields), so it's parsed wholesale.
+    // Each role object carries that role's full state; an omitted object
+    // leaves the role's state, and any pending scheduled update, unchanged.
     final metadataJson = payload['metadata'] as Map<String, dynamic>?;
+    if (metadataJson != null) {
+      _receiveMetadata(SendspinMetadata.fromJson(metadataJson));
+    }
+
     final controller =
         _parseController(payload['controller'] as Map<String, dynamic>?);
-
-    SendspinMetadata? mergedMetadata;
-    if (metadataJson != null) {
-      final prev = _state.metadata ?? const SendspinMetadata();
-      mergedMetadata = prev.mergeDelta(metadataJson);
-    }
-
-    if (mergedMetadata == null && controller == null) return;
-
-    var newState = _state;
-    if (mergedMetadata != null) {
-      newState = newState.copyWith(metadata: mergedMetadata);
-    }
     if (controller != null) {
-      newState = newState.copyWith(controller: controller);
+      _updateState(_state.copyWith(controller: controller));
+      onControllerUpdate?.call(controller);
     }
-    _updateState(newState);
+  }
 
-    if (mergedMetadata != null) onMetadataUpdate?.call(mergedMetadata);
-    if (controller != null) onControllerUpdate?.call(controller);
+  /// Microseconds until [metadata] takes effect on the local clock, using the
+  /// time filter's current best estimate. Zero or negative means now.
+  int _usUntilEffective(SendspinMetadata metadata) =>
+      _clock.computeClientTime(metadata.timestamp) - nowUs();
+
+  void _receiveMetadata(SendspinMetadata metadata) {
+    // Either way the held pending update is gone: a future-timestamped state
+    // replaces it, a past or present one discards it.
+    _pendingMetadataTimer?.cancel();
+    _pendingMetadataTimer = null;
+    _pendingMetadata = null;
+
+    final waitUs = _usUntilEffective(metadata);
+    if (waitUs <= 0) {
+      _applyMetadata(metadata);
+      return;
+    }
+    _pendingMetadata = metadata;
+    _pendingMetadataTimer =
+        Timer(Duration(microseconds: waitUs), _onPendingMetadataDue);
+  }
+
+  void _onPendingMetadataDue() {
+    final pending = _pendingMetadata;
+    if (pending == null) return;
+    // The filter may have moved since the timer was armed; wait out any
+    // remainder rather than showing the update early.
+    final waitUs = _usUntilEffective(pending);
+    if (waitUs > 0) {
+      _pendingMetadataTimer =
+          Timer(Duration(microseconds: waitUs), _onPendingMetadataDue);
+      return;
+    }
+    _pendingMetadataTimer = null;
+    _pendingMetadata = null;
+    _applyMetadata(pending);
+  }
+
+  void _applyMetadata(SendspinMetadata metadata) {
+    _updateState(_state.copyWith(metadata: metadata));
+    onMetadataUpdate?.call(metadata);
+  }
+
+  /// Drops the current metadata state and any pending scheduled update.
+  void _discardMetadata() {
+    _pendingMetadataTimer?.cancel();
+    _pendingMetadataTimer = null;
+    _pendingMetadata = null;
+    if (_state.metadata != null) {
+      _updateState(_state.copyWith(clearMetadata: true));
+    }
   }
 
   SendspinControllerInfo? _parseController(Map<String, dynamic>? json) {
@@ -752,12 +804,14 @@ class SendspinProtocol {
     _stopStateReporting();
     _clock.reset();
     _arrivalDelay.reset();
+    _discardMetadata();
   }
 
   /// Cleans up timers and stream controller.
   void dispose() {
     stopClockSync();
     _stopStateReporting();
+    _pendingMetadataTimer?.cancel();
     _stateController.close();
   }
 }
