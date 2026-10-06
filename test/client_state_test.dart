@@ -224,7 +224,7 @@ void main() {
         identity: testIdentity,
         bufferSeconds: 5,
         unpairedAccess: true,
-        pskCandidates: () => [SendspinPskCandidate.pairing(pairingPsk)],
+        pairing: SendspinPairing.inMemory(pairingPsk: pairingPsk),
       );
       addTearDown(protocol.dispose);
       final server = connect(protocol);

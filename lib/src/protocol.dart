@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'activation.dart';
 import 'arrival_delay.dart';
 import 'channel.dart';
 import 'identity.dart';
+import 'encoding.dart';
 import 'json_util.dart';
 import 'models.dart';
+import 'pairing.dart';
 import 'clock.dart';
 import 'psk.dart';
 import 'time_burst.dart';
@@ -196,6 +199,23 @@ class SendspinProtocol {
   /// Drops a connection whose server never declares its purpose.
   Timer? _activateTimer;
 
+  /// Pairing `server/activate` messages received since the last Noise
+  /// handshake; sent as `pairing_index`.
+  int _pairingIndex = 0;
+
+  /// The long-term PSK offered in the pairing attempt in progress, from
+  /// `client/pair-init` until success or abort.
+  Uint8List? _pairingAttemptPsk;
+  Timer? _pairingAttemptTimer;
+
+  /// Set once this client has aborted an attempt: pairing messages still in
+  /// flight from the server are discarded until the next `server/activate`.
+  bool _pairingAborted = false;
+
+  /// The server whose pairing record keys this connection, kept from
+  /// eviction while the connection is open.
+  String? _retainedServerId;
+
   int _outputDelayMs = 0;
   int _requiredLeadTimeMs;
   int _minBufferMs;
@@ -241,6 +261,19 @@ class SendspinProtocol {
   /// (`unsupported_version`, `unsupported_suite` or `malformed`). [onClose]
   /// follows.
   void Function(String reason)? onServerError;
+
+  /// Called when a pairing completes and the record for [serverId] has
+  /// been stored. The server normally re-handshakes to the new long-term PSK
+  /// straight afterwards.
+  void Function(String serverId)? onPaired;
+
+  /// Called when a pairing attempt ends without pairing because the server
+  /// sent `pair/abort`, with its reason (e.g. `user_cancelled`).
+  void Function(String reason)? onPairingAborted;
+
+  /// Called if persisting pairing records through the [SendspinPairingStore]
+  /// fails. The in-memory records are already updated.
+  void Function(Object error)? onPairingStoreError;
 
   /// Called after each admissible `server/activate` has been applied, with
   /// the connection's activities and active roles. Also readable from
@@ -298,8 +331,9 @@ class SendspinProtocol {
     this.roles = const {SendspinRole.player},
     this.artworkChannels,
     required bool unpairedAccess,
-    List<SendspinPskCandidate> Function()? pskCandidates,
+    SendspinPairing? pairing,
     this.activateTimeout = const Duration(seconds: 30),
+    this.pairingAttemptTimeout = const Duration(minutes: 2),
     Set<SendspinPlayerCommand> supportedCommands = const {
       SendspinPlayerCommand.volume,
       SendspinPlayerCommand.mute,
@@ -311,6 +345,7 @@ class SendspinProtocol {
     int Function()? now,
   })  : _now = now,
         _unpairedAccess = unpairedAccess,
+        pairing = pairing ?? SendspinPairing.inMemory(),
         _supportedCommands = Set.of(supportedCommands),
         _requiredLeadTimeMs = requiredLeadTimeMs,
         _minBufferMs = minBufferMs {
@@ -329,7 +364,8 @@ class SendspinProtocol {
     _state = _state.copyWith(outputDelayMs: _outputDelayMs);
     _timeBurst = SendspinTimeBurst(now: nowUs);
     _wireTimeBurst();
-    _channel = SendspinChannel(identity: identity, pskCandidates: pskCandidates)
+    _channel = SendspinChannel(
+        identity: identity, pskCandidates: this.pairing.candidates)
       ..onSendText = ((text) => onSendText?.call(text))
       ..onSendBinary = ((data) => onSendBinary?.call(data))
       ..onJson = _dispatchJson
@@ -343,6 +379,21 @@ class SendspinProtocol {
   /// How long to wait for the first `server/activate` after the handshake
   /// before dropping the connection.
   final Duration activateTimeout;
+
+  /// How long a pairing attempt may run, from its first message, before the
+  /// client aborts it with `attempt_timeout`.
+  final Duration pairingAttemptTimeout;
+
+  /// The device's pairing PSK and pairing records. When none is supplied an
+  /// in-memory one with a fresh pairing PSK is used, which loses its
+  /// pairings on restart; pass one loaded from a [SendspinPairingStore] to
+  /// keep them.
+  final SendspinPairing pairing;
+
+  /// The token an operator enters into a server to pair by the Pairing PSK
+  /// method: this device's public key and pairing PSK, as text for a QR code
+  /// or copy and paste.
+  String get pairingToken => pairing.pairingToken(identity.publicKey);
 
   /// Local monotonic clock in microseconds. All client-side timestamps
   /// (filter `time_added`, NTP `client_transmitted`/`client_received`, and
@@ -779,6 +830,13 @@ class SendspinProtocol {
 
   void _handleHandshakeComplete(SendspinHandshakeResult result) {
     _handshake = result;
+    _pairingIndex = 0;
+    _releasePairingRecord();
+    if (result.matchedCategory == SendspinPskCategory.longTerm) {
+      pairing.markUsed(result.serverId);
+      pairing.retain(result.serverId);
+      _retainedServerId = result.serverId;
+    }
     if (result.isRehandshake) return;
     _updateState(_state.copyWith(serverId: result.serverId));
     _activateTimer = Timer(activateTimeout, () {
@@ -818,7 +876,15 @@ class SendspinProtocol {
     onClose?.call(reason);
   }
 
+  void _releasePairingRecord() {
+    final serverId = _retainedServerId;
+    if (serverId != null) pairing.release(serverId);
+    _retainedServerId = null;
+  }
+
   void _stopTimers() {
+    _endPairingAttempt();
+    _releasePairingRecord();
     _activateTimer?.cancel();
     _activateTimer = null;
     _timeBurst.stop();
@@ -839,6 +905,14 @@ class SendspinProtocol {
     if (!_activated || _rehandshaking) return;
 
     switch (type) {
+      case 'server/pair-finalize':
+      case 'server/pair-init':
+      case 'server/pair-auth':
+      case 'server/pair-confirm':
+      case 'pair/abort':
+        _handlePairingMessage(type, payload);
+      case 'server/unpair':
+        _handleServerUnpair();
       case 'server/time':
         _handleServerTime(payload);
       case 'stream/start':
@@ -879,6 +953,13 @@ class SendspinProtocol {
     }
     final activities = rawActivities.cast<String>().toSet();
     if (activities.length != rawActivities.length) return;
+
+    // Any server/activate ends a pairing attempt that has not finalized:
+    // nothing is persisted and the offered PSK is discarded. It also ends the
+    // window in which this client discards late pairing messages.
+    _endPairingAttempt();
+    _pairingAborted = false;
+    if (activities.contains(activityPairing)) _pairingIndex++;
     final rawRoles = payload['active_roles'];
     final explicitRoles =
         rawRoles is List ? rawRoles.whereType<String>().toList() : null;
@@ -965,6 +1046,11 @@ class SendspinProtocol {
     // depends on the clock any more.
     _reportStateIfChanged();
 
+    // Each pairing activation admits one attempt. The admissibility check
+    // above has already established that the method is `pairing_psk` and
+    // that the pairing PSK is what the handshake matched.
+    if (activities.contains(activityPairing)) _startPairingAttempt();
+
     onActivate?.call(activities, newRoles);
   }
 
@@ -990,6 +1076,111 @@ class SendspinProtocol {
       _clockSyncPaused = false;
       _timeBurst.start();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Pairing
+  // -------------------------------------------------------------------------
+
+  /// Pairing PSK flow: `client/pair-init` followed immediately by
+  /// `client/pair-finalize` carrying a fresh long-term PSK, without waiting
+  /// for the server.
+  void _startPairingAttempt() {
+    final random = Random.secure();
+    final psk = Uint8List.fromList(
+        List<int>.generate(pskLength, (_) => random.nextInt(256)));
+    _pairingAttemptPsk = psk;
+    _pairingAttemptTimer = Timer(pairingAttemptTimeout, () {
+      _abortPairing('attempt_timeout');
+    });
+    _sendApplication(jsonEncode({
+      'type': 'client/pair-init',
+      'payload': {'pairing_index': _pairingIndex},
+    }));
+    _sendApplication(jsonEncode({
+      'type': 'client/pair-finalize',
+      'payload': {'long_term_psk': base64UrlNoPad(psk)},
+    }));
+  }
+
+  void _endPairingAttempt() {
+    _pairingAttemptTimer?.cancel();
+    _pairingAttemptTimer = null;
+    _pairingAttemptPsk = null;
+  }
+
+  /// Ends the attempt in progress with `pair/abort`. The connection stays
+  /// open, and pairing messages the server sent before it saw the abort are
+  /// discarded until its next `server/activate`.
+  void _abortPairing(String reason) {
+    if (_pairingAttemptPsk == null) return;
+    _endPairingAttempt();
+    _pairingAborted = true;
+    _sendApplication(jsonEncode({
+      'type': 'pair/abort',
+      'payload': {'reason': reason},
+    }));
+  }
+
+  /// Aborts the pairing attempt in progress on the operator's behalf with
+  /// `pair/abort` reason `user_cancelled`. Does nothing if none is running.
+  void cancelPairing() => _abortPairing('user_cancelled');
+
+  /// Refuses this connection's pairing because another pairing attempt is
+  /// already in progress with this device, or because the device does not
+  /// admit a pairing connection alongside its admitted one: sends
+  /// `pair/abort` reason `concurrent_attempt` and closes.
+  void rejectConcurrentPairing() {
+    if (_channel.isEstablished) {
+      _channel.sendJsonText(jsonEncode({
+        'type': 'pair/abort',
+        'payload': {'reason': 'concurrent_attempt'},
+      }));
+    }
+    _channel.close('pair/abort concurrent_attempt');
+  }
+
+  void _handlePairingMessage(String type, Map<String, dynamic> payload) {
+    final psk = _pairingAttemptPsk;
+    if (type == 'pair/abort') {
+      // Has no effect once the attempt is already over.
+      if (psk == null) return;
+      _endPairingAttempt();
+      final reason = payload['reason'];
+      onPairingAborted?.call(reason is String ? reason : 'unknown');
+      return;
+    }
+    if (_pairingAborted) return;
+
+    final handshake = _handshake;
+    if (type == 'server/pair-finalize' && psk != null && handshake != null) {
+      // The server has persisted its record; persist ours.
+      _endPairingAttempt();
+      pairing
+          .addRecord(SendspinPairingRecord(
+              serverId: handshake.serverId, longTermPsk: psk))
+          .catchError((Object e) => onPairingStoreError?.call(e));
+      onPaired?.call(handshake.serverId);
+      return;
+    }
+    // Anything else is out of sequence for the Pairing PSK method: a protocol
+    // error. Close without an application-level message; persist nothing.
+    _channel.close('pairing message out of sequence: $type');
+  }
+
+  /// `server/unpair`: a paired server drops its record from this client.
+  /// Ignored on an unpaired session.
+  void _handleServerUnpair() {
+    final handshake = _handshake;
+    if (handshake == null ||
+        handshake.matchedCategory != SendspinPskCategory.longTerm) {
+      return;
+    }
+    _releasePairingRecord();
+    pairing
+        .removeRecord(handshake.serverId)
+        .catchError((Object e) => onPairingStoreError?.call(e));
+    _goodbyeAndClose(SendspinGoodbyeReason.unpaired);
   }
 
   /// Applies the removal of [role] from `active_roles`: stream roles stop
@@ -1321,6 +1512,10 @@ class SendspinProtocol {
     _handshake = null;
     _helloReceived = false;
     _activated = false;
+    _endPairingAttempt();
+    _releasePairingRecord();
+    _pairingAborted = false;
+    _pairingIndex = 0;
     _rehandshaking = false;
     _clockSyncPaused = false;
     _playerStreamActive = false;

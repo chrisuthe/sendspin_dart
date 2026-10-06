@@ -47,6 +47,37 @@ protocol. It cannot talk to pre-rc1 servers.
   `SendspinChannel`, `NoiseHandshake` / `NoiseSession`, and
   `example/sendspin_cli.dart`.
 
+### Pairing
+
+- The Pairing PSK method is implemented. After a pairing `server/activate`
+  on a connection keyed by the pairing PSK, the client sends
+  `client/pair-init` and `client/pair-finalize` back to back with a fresh
+  long-term PSK, stores the pairing record when `server/pair-finalize`
+  arrives, and is ready for the server's re-handshake to that PSK.
+- New `SendspinPairing` holds the device's pairing PSK and its pairing
+  records (at least 5, least recently used evicted, never one backing an
+  open connection, an existing record for the same server replaced). It is
+  loaded from a `SendspinPairingStore` the consumer implements; pass it as
+  `pairing:`. Without one, an in-memory instance is used and pairings do not
+  survive a restart.
+- `pairingToken` gives the `SP:0...` token (public key plus pairing PSK) to
+  show the operator as text or a QR code.
+- The pairing PSK is always among the handshake candidates, so a server can
+  re-handshake to it at any time.
+- `pair/abort` in both directions: `cancelPairing()` (`user_cancelled`),
+  `rejectConcurrentPairing()` (`concurrent_attempt`, then close), the 2-minute
+  attempt timeout (`attempt_timeout`), and `onPairingAborted` for an abort
+  from the server. A `server/activate` in place of `server/pair-finalize`
+  abandons the attempt and nothing is stored.
+- `server/unpair` on a paired session removes the record, sends
+  `client/goodbye` reason `unpaired` and closes; on an unpaired session it is
+  ignored.
+- A pairing message that is out of sequence closes the connection without an
+  application-level message.
+- New callbacks `onPaired`, `onPairingAborted`, `onPairingStoreError`.
+- The `pskCandidates` constructor hook is replaced by `pairing`.
+- Not implemented: the optional dynamic and static pairing-code methods.
+
 ### client/state and player commands
 
 - `client/state` carries `available` on every message instead of

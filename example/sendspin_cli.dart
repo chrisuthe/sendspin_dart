@@ -2,8 +2,10 @@
 // ABOUTME: Connects to a server, logs the session and discards the audio.
 //
 // Usage: dart run example/sendspin_cli.dart ws://host:8927/sendspin
-//          [--seconds N] [--key-file PATH] [--no-unpaired] [--name NAME]
+//          [--seconds N] [--key-file PATH] [--pairing-file PATH]
+//          [--token-file PATH] [--no-unpaired] [--name NAME]
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -24,6 +26,22 @@ class FileIdentityStore implements SendspinIdentityStore {
       file.writeAsBytes(privateKey, flush: true);
 }
 
+/// Keeps the pairing PSK and pairing records in a JSON file.
+class FilePairingStore implements SendspinPairingStore {
+  final File file;
+  FilePairingStore(String path) : file = File(path);
+
+  @override
+  Future<SendspinPairingData?> load() async => await file.exists()
+      ? SendspinPairingData.fromJson(
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>)
+      : null;
+
+  @override
+  Future<void> save(SendspinPairingData data) =>
+      file.writeAsString(jsonEncode(data.toJson()), flush: true);
+}
+
 String? _option(List<String> args, String name) {
   final i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
@@ -34,7 +52,8 @@ void _log(String line) => stdout.writeln(line);
 Future<void> main(List<String> args) async {
   if (args.isEmpty || args.first.startsWith('--')) {
     stderr.writeln('usage: sendspin_cli.dart ws://host:port/sendspin '
-        '[--seconds N] [--key-file PATH] [--no-unpaired] [--name NAME]');
+        '[--seconds N] [--key-file PATH] [--pairing-file PATH] '
+        '[--token-file PATH] [--no-unpaired] [--name NAME]');
     exit(64);
   }
   final url = args.first;
@@ -46,11 +65,21 @@ Future<void> main(List<String> args) async {
       : await SendspinIdentity.loadOrCreate(FileIdentityStore(keyFile));
   _log('client_id ${identity.clientId}');
 
+  final pairingFile = _option(args, '--pairing-file');
+  final pairing = pairingFile == null
+      ? SendspinPairing.inMemory()
+      : await SendspinPairing.load(FilePairingStore(pairingFile));
+  final token = pairing.pairingToken(identity.publicKey);
+  _log('pairing token $token (${pairing.records.length} pairing records)');
+  final tokenFile = _option(args, '--token-file');
+  if (tokenFile != null) await File(tokenFile).writeAsString(token);
+
   final player = SendspinPlayer(
     playerName: _option(args, '--name') ?? 'sendspin_dart example',
     identity: identity,
     bufferSeconds: 5,
     unpairedAccess: !args.contains('--no-unpaired'),
+    pairing: pairing,
     additionalRoles: const {SendspinRole.metadata, SendspinRole.controller},
   );
 
@@ -64,6 +93,8 @@ Future<void> main(List<String> args) async {
   player.onSendBinary = ws.add;
   player.onClose = (reason) => finish('closed: $reason');
   player.onServerError = (reason) => _log('server/error $reason');
+  player.onPaired = (serverId) => _log('paired with $serverId');
+  player.onPairingAborted = (reason) => _log('pairing aborted: $reason');
   player.onActivate = (activities, roles) =>
       _log('activate activities=$activities roles=$roles '
           'paired=${player.isPaired} server=${player.serverId}');

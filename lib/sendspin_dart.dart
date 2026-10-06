@@ -11,6 +11,7 @@ export 'src/time_burst.dart';
 export 'src/codec.dart';
 export 'src/identity.dart';
 export 'src/models.dart';
+export 'src/pairing.dart';
 export 'src/psk.dart';
 export 'src/audio_sink.dart';
 export 'src/client.dart';

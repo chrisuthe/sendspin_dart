@@ -18,7 +18,7 @@ const _allRoles = {
 SendspinProtocol _protocol({
   bool unpairedAccess = true,
   Set<SendspinRole> roles = _allRoles,
-  List<SendspinPskCandidate> Function()? pskCandidates,
+  SendspinPairing? pairing,
   DeviceInfo deviceInfo = const DeviceInfo(),
 }) {
   final protocol = SendspinProtocol(
@@ -27,7 +27,7 @@ SendspinProtocol _protocol({
     bufferSeconds: 5,
     roles: roles,
     unpairedAccess: unpairedAccess,
-    pskCandidates: pskCandidates,
+    pairing: pairing,
     deviceInfo: deviceInfo,
   );
   addTearDown(protocol.dispose);
@@ -44,10 +44,10 @@ final Uint8List _pairingPsk =
   final server = FakeServer(psk: _longTermPsk, pskCategory: 'lt');
   final protocol = _protocol(
     unpairedAccess: false,
-    pskCandidates: () => [
-      SendspinPskCandidate.longTerm(
-          psk: _longTermPsk, serverId: server.serverId),
-    ],
+    pairing: SendspinPairing.inMemory(records: [
+      SendspinPairingRecord(
+          serverId: server.serverId, longTermPsk: _longTermPsk),
+    ]),
   );
   return (protocol, server);
 }
@@ -696,10 +696,10 @@ void main() {
     test('turning it off does not affect a paired session', () {
       final server = FakeServer(psk: _longTermPsk, pskCategory: 'lt');
       final protocol = _protocol(
-        pskCandidates: () => [
-          SendspinPskCandidate.longTerm(
-              psk: _longTermPsk, serverId: server.serverId),
-        ],
+        pairing: SendspinPairing.inMemory(records: [
+          SendspinPairingRecord(
+              serverId: server.serverId, longTermPsk: _longTermPsk),
+        ]),
       );
       final closes = <String>[];
       protocol.onClose = closes.add;
@@ -721,8 +721,8 @@ void main() {
     late SendspinProtocol protocol;
     late FakeServer server;
     setUp(() {
-      protocol = _protocol(
-          pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+      protocol =
+          _protocol(pairing: SendspinPairing.inMemory(pairingPsk: _pairingPsk));
       server = connect(protocol);
     });
 
@@ -759,7 +759,7 @@ void main() {
     test('clock sync pauses during it and resumes afterwards', () {
       fakeAsync((async) {
         final p = _protocol(
-            pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+            pairing: SendspinPairing.inMemory(pairingPsk: _pairingPsk));
         final s = connect(p);
         s.startRehandshake(_pairingPsk, 'pr');
         async.elapse(const Duration(seconds: 20));
@@ -794,7 +794,7 @@ void main() {
         () {
       fakeAsync((async) {
         final p = _protocol(
-            pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+            pairing: SendspinPairing.inMemory(pairingPsk: _pairingPsk));
         final closes = <String>[];
         p.onClose = closes.add;
         final s = connect(p);
@@ -839,8 +839,8 @@ void main() {
     });
 
     test('a re-handshake before the first activation is handled', () {
-      final p = _protocol(
-          pskCandidates: () => [SendspinPskCandidate.pairing(_pairingPsk)]);
+      final p =
+          _protocol(pairing: SendspinPairing.inMemory(pairingPsk: _pairingPsk));
       final s = connect(p, activate: false);
       s.startRehandshake(_pairingPsk, 'pr');
       expect(s.receivedJson, isEmpty);
