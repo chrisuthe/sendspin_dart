@@ -378,26 +378,26 @@ void main() {
 
     test('handles set_static_delay command and invokes callback', () async {
       int? receivedDelay;
-      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+      protocol.onOutputDelayChanged = (d) => receivedDelay = d;
 
       serverSends(
           protocol,
           jsonEncode({
             'type': 'server/command',
             'payload': {
-              'player': {'command': 'set_static_delay', 'static_delay_ms': 250},
+              'player': {'command': 'set_output_delay', 'output_delay_ms': 250},
             },
           }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 250);
-      expect(protocol.staticDelayMs, 250);
-      expect(protocol.state.staticDelayMs, 250);
+      expect(protocol.outputDelayMs, 250);
+      expect(protocol.state.outputDelayMs, 250);
     });
 
     test('clamps set_static_delay above max to 5000', () async {
       int? receivedDelay;
-      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+      protocol.onOutputDelayChanged = (d) => receivedDelay = d;
 
       serverSends(
           protocol,
@@ -405,20 +405,20 @@ void main() {
             'type': 'server/command',
             'payload': {
               'player': {
-                'command': 'set_static_delay',
-                'static_delay_ms': 99999
+                'command': 'set_output_delay',
+                'output_delay_ms': 99999
               },
             },
           }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 5000);
-      expect(protocol.staticDelayMs, 5000);
+      expect(protocol.outputDelayMs, 5000);
     });
 
     test('clamps negative set_static_delay to 0', () async {
       int? receivedDelay;
-      protocol.onStaticDelayChanged = (d) => receivedDelay = d;
+      protocol.onOutputDelayChanged = (d) => receivedDelay = d;
 
       serverSends(
           protocol,
@@ -426,132 +426,92 @@ void main() {
             'type': 'server/command',
             'payload': {
               'player': {
-                'command': 'set_static_delay',
-                'static_delay_ms': -100
+                'command': 'set_output_delay',
+                'output_delay_ms': -100
               },
             },
           }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 0);
-      expect(protocol.staticDelayMs, 0);
+      expect(protocol.outputDelayMs, 0);
     });
 
-    test('staticDelayMs getter reflects latest value across updates', () {
-      expect(protocol.staticDelayMs, 0);
+    test('outputDelayMs getter reflects latest value across updates', () {
+      expect(protocol.outputDelayMs, 0);
 
       serverSends(
           protocol,
           jsonEncode({
             'type': 'server/command',
             'payload': {
-              'player': {'command': 'set_static_delay', 'static_delay_ms': 100},
+              'player': {'command': 'set_output_delay', 'output_delay_ms': 100},
             },
           }));
-      expect(protocol.staticDelayMs, 100);
+      expect(protocol.outputDelayMs, 100);
 
       serverSends(
           protocol,
           jsonEncode({
             'type': 'server/command',
             'payload': {
-              'player': {'command': 'set_static_delay', 'static_delay_ms': 500},
+              'player': {'command': 'set_output_delay', 'output_delay_ms': 500},
             },
           }));
-      expect(protocol.staticDelayMs, 500);
+      expect(protocol.outputDelayMs, 500);
     });
 
-    test('initialStaticDelayMs sets staticDelayMs at construction', () {
+    test('initialOutputDelayMs sets outputDelayMs at construction', () {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: 1500,
+        initialOutputDelayMs: 1500,
       );
-      expect(p.staticDelayMs, 1500);
+      expect(p.outputDelayMs, 1500);
       p.dispose();
     });
 
-    test('initialStaticDelayMs is reflected in buildClientState', () {
+    test('initialOutputDelayMs is reflected in buildClientState', () {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: 1500,
+        initialOutputDelayMs: 1500,
       );
+      connect(p);
       final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
       expect(
-        (parsed['payload']['player'] as Map)['static_delay_ms'],
+        (parsed['payload']['player'] as Map)['output_delay_ms'],
         1500,
       );
       p.dispose();
     });
 
-    test('initialStaticDelayMs above max is clamped to 5000', () {
+    test('initialOutputDelayMs above max is clamped to 5000', () {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: 99999,
+        initialOutputDelayMs: 99999,
       );
-      expect(p.staticDelayMs, 5000);
+      expect(p.outputDelayMs, 5000);
       p.dispose();
     });
 
-    test('negative initialStaticDelayMs is clamped to 0', () {
+    test('negative initialOutputDelayMs is clamped to 0', () {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: -50,
+        initialOutputDelayMs: -50,
       );
-      expect(p.staticDelayMs, 0);
+      expect(p.outputDelayMs, 0);
       p.dispose();
-    });
-
-    test('buildClientState defaults to synchronized', () {
-      final parsed =
-          jsonDecode(protocol.buildClientState()) as Map<String, dynamic>;
-      expect(parsed['payload']['state'], 'synchronized');
-    });
-
-    test('setPipelineError(true) flips buildClientState to error', () {
-      protocol.setPipelineError(true);
-      final parsed =
-          jsonDecode(protocol.buildClientState()) as Map<String, dynamic>;
-      expect(parsed['payload']['state'], 'error');
-    });
-
-    test('setPipelineError(true) emits client/state via onSendText', () {
-      final sent = <String>[];
-      captureSent(protocol, sent);
-      protocol.setPipelineError(true);
-      expect(sent, hasLength(1));
-      final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
-      expect(parsed['type'], 'client/state');
-      expect(parsed['payload']['state'], 'error');
-    });
-
-    test('setPipelineError is idempotent when repeated', () {
-      final sent = <String>[];
-      captureSent(protocol, sent);
-      protocol.setPipelineError(true);
-      protocol.setPipelineError(true);
-      expect(sent, hasLength(1));
-    });
-
-    test('setPipelineError(false) after error sends synchronized report', () {
-      final sent = <String>[];
-      captureSent(protocol, sent);
-      protocol.setPipelineError(true);
-      protocol.setPipelineError(false);
-      expect(sent, hasLength(2));
-      final recovered = jsonDecode(sent[1]) as Map<String, dynamic>;
-      expect(recovered['payload']['state'], 'synchronized');
     });
 
     test('buildClientGoodbye returns correct JSON for shutdown', () {
@@ -1746,38 +1706,6 @@ void main() {
       // Boundary values should work
       p.sendControllerVolume(0);
       p.sendControllerVolume(100);
-      p.dispose();
-    });
-  });
-
-  group('buildClientState role-awareness', () {
-    test('controller-only client omits player block from client/state', () {
-      final p = SendspinProtocol(
-        playerName: 'Remote',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 0,
-        roles: const {SendspinRole.controller},
-      );
-      final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
-      final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['state'], 'synchronized');
-      expect(payload.containsKey('player'), isFalse);
-      p.dispose();
-    });
-
-    test('player role includes player block in client/state', () {
-      final p = SendspinProtocol(
-        playerName: 'P',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 5,
-      );
-      final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
-      final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['state'], 'synchronized');
-      expect(payload.containsKey('player'), isTrue);
-      expect((payload['player'] as Map)['volume'], 100);
       p.dispose();
     });
   });

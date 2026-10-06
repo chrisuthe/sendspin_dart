@@ -47,6 +47,38 @@ protocol. It cannot talk to pre-rc1 servers.
   `SendspinChannel`, `NoiseHandshake` / `NoiseSession`, and
   `example/sendspin_cli.dart`.
 
+### client/state and player commands
+
+- `client/state` carries `available` on every message instead of
+  `state: 'synchronized' | 'error'`. A player reports `available: false`
+  until its time filter is synchronized, then sends a new state. The second
+  clock-sync burst now follows the first after 100 ms rather than 10 s, so
+  that takes well under a second.
+- The player object is the rc1 one: `volume`, `muted`, `output_delay_ms`,
+  `required_lead_time_ms`, `min_buffer_ms`, `supported_commands`
+  (`volume`, `mute`, `set_output_delay`) and optional `format`. It is sent in
+  full each time, and only while the player role is active.
+- **Renamed:** static delay is output delay throughout:
+  `initialOutputDelayMs`, `outputDelayMs`, `onOutputDelayChanged`,
+  `state.outputDelayMs`, `SendspinBuffer.outputDelayMs`, and on the wire
+  `output_delay_ms` / `set_output_delay`. The spec requires the delay to
+  survive reboots: persist it from `onOutputDelayChanged` and pass it back as
+  `initialOutputDelayMs`.
+- New constructor arguments `requiredLeadTimeMs` and `minBufferMs` (both
+  default to 250) and `setTimingParameters(...)` to update them. They depend
+  on the audio backend, so the consumer supplies them. The reported
+  `min_buffer_ms` is `minBufferMs` or the measured arrival-delay tail,
+  whichever is larger.
+- New `supportedCommands` constructor argument and `setSupportedCommands`.
+  Commands not currently listed are ignored.
+- New `preferredFormat`, `setAvailable`, `sendLeave`, `setOutputDelayMs`,
+  `updateMuted`, `isAvailable`.
+- The `artwork` object (channels with `width` / `height`) is reported in
+  `client/state` while the artwork role is active.
+- **Removed:** `setPipelineError`, the player's underrun poll that drove it,
+  and the 5-second periodic `client/state` resend. rc1 has no error state and
+  state is sent when it changes.
+
 ### Identity: client_id is a Curve25519 public key
 
 - `SendspinProtocol` and `SendspinPlayer` take `identity:` (a

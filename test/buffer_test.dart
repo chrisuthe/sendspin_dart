@@ -184,7 +184,7 @@ void main() {
         startupBufferMs: 0,
         maxBufferMs: 15000,
       );
-      buffer.staticDelayMs = 1000; // 96000 samples needed
+      buffer.outputDelayMs = 1000; // 96000 samples needed
       buffer.addChunk(1000, Int16List.fromList(List.filled(960, 1)));
       final result = buffer.pullSamples(960);
       expect(result, Int16List(960));

@@ -50,6 +50,11 @@ class SendspinTimeBurst {
   /// payload.
   void Function(int clientTransmittedUs)? onSendTimeMessage;
 
+  /// Optional override for the wait before the next burst, consulted when a
+  /// burst completes. Returning null keeps [burstInterval]. Lets the owner
+  /// run bursts back to back until the filter is usable.
+  Duration? Function()? nextBurstDelay;
+
   /// Called once per burst with the lowest-`max_error` sample. Wire this
   /// into [SendspinClock.update].
   void Function(int offset, int maxError, int timeAdded)? onApplyBestSample;
@@ -176,6 +181,7 @@ class SendspinTimeBurst {
       _burstsCompleted++;
     }
     if (!_started) return;
-    _interBurstTimer = Timer(burstInterval, _beginBurst);
+    _interBurstTimer =
+        Timer(nextBurstDelay?.call() ?? burstInterval, _beginBurst);
   }
 }

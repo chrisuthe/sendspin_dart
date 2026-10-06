@@ -100,8 +100,8 @@ void main() {
       expect(ch.toJson(), {
         'source': 'artist',
         'format': 'png',
-        'media_width': 256,
-        'media_height': 256,
+        'width': 256,
+        'height': 256,
       });
     });
   });

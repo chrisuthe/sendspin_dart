@@ -43,12 +43,12 @@ String _streamEnd() => jsonEncode({'type': 'stream/end', 'payload': {}});
 String _streamClear() => jsonEncode({'type': 'stream/clear', 'payload': {}});
 
 /// Helper: builds a server/command set_static_delay JSON message.
-String _setStaticDelay(int delayMs) => jsonEncode({
+String _setOutputDelay(int delayMs) => jsonEncode({
       'type': 'server/command',
       'payload': {
         'player': {
-          'command': 'set_static_delay',
-          'static_delay_ms': delayMs,
+          'command': 'set_output_delay',
+          'output_delay_ms': delayMs,
         },
       },
     });
@@ -253,8 +253,8 @@ void main() {
     test('set_static_delay before stream/start is honored on fresh buffer', () {
       serverSends(player, _serverHello());
       // Static delay of 500ms: at 48kHz stereo = 48000 samples held back.
-      serverSends(player, _setStaticDelay(500));
-      expect(player.protocol.staticDelayMs, 500);
+      serverSends(player, _setOutputDelay(500));
+      expect(player.protocol.outputDelayMs, 500);
 
       serverSends(
           player,
@@ -303,32 +303,32 @@ void main() {
       expect(before.any((s) => s != 0), isTrue);
 
       // Apply a 1000ms static delay mid-stream. 48000 samples/ch = 96000 needed.
-      serverSends(player, _setStaticDelay(1000));
+      serverSends(player, _setOutputDelay(1000));
 
       // Buffer now below the delay threshold — should return silence.
       final after = player.pullSamples(960);
       expect(after.every((s) => s == 0), isTrue);
     });
 
-    test('initialStaticDelayMs is exposed via staticDelayMs getter', () {
+    test('initialOutputDelayMs is exposed via outputDelayMs getter', () {
       final p = SendspinPlayer(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: 800,
+        initialOutputDelayMs: 800,
       );
-      expect(p.staticDelayMs, 800);
+      expect(p.outputDelayMs, 800);
       p.dispose();
     });
 
-    test('initialStaticDelayMs applies to fresh buffer on stream/start', () {
+    test('initialOutputDelayMs applies to fresh buffer on stream/start', () {
       final p = SendspinPlayer(
         playerName: 'Test',
         identity: testIdentity,
         unpairedAccess: true,
         bufferSeconds: 5,
-        initialStaticDelayMs: 500,
+        initialOutputDelayMs: 500,
       );
 
       serverSends(p, _serverHello());
@@ -360,10 +360,10 @@ void main() {
     });
 
     test(
-        'user onStaticDelayChanged callback coexists with internal buffer wiring',
+        'user onOutputDelayChanged callback coexists with internal buffer wiring',
         () {
       int? cbDelay;
-      player.onStaticDelayChanged = (d) => cbDelay = d;
+      player.onOutputDelayChanged = (d) => cbDelay = d;
 
       serverSends(player, _serverHello());
       serverSends(
@@ -384,45 +384,13 @@ void main() {
       expect(before.any((s) => s != 0), isTrue);
 
       // Server commands a 1000ms delay — 96000 samples needed.
-      serverSends(player, _setStaticDelay(1000));
+      serverSends(player, _setOutputDelay(1000));
 
       // User callback fired.
       expect(cbDelay, 1000);
       // Internal buffer wiring still works — below threshold -> silence.
       final after = player.pullSamples(960);
       expect(after.every((s) => s == 0), isTrue);
-    });
-
-    test('underrun triggers state=error via periodic poll', () async {
-      final sent = <String>[];
-      captureSent(player, sent);
-
-      serverSends(player, _serverHello());
-      serverSends(
-          player,
-          _streamStart(
-            sampleRate: 48000,
-            channels: 2,
-            bitDepth: 16,
-          ));
-
-      final pcm = Int16List(24000);
-      for (int i = 0; i < pcm.length; i++) pcm[i] = 1000;
-      serverSendsBinary(player, _binaryFrame(1000000, pcm));
-
-      // Drain the buffer so the next pull underruns.
-      for (int i = 0; i < 40; i++) {
-        player.pullSamples(960);
-      }
-
-      await Future.delayed(const Duration(milliseconds: 600));
-
-      final errorMsg = sent.firstWhere(
-        (m) => m.contains('"state":"error"'),
-        orElse: () => '',
-      );
-      expect(errorMsg.isNotEmpty, isTrue,
-          reason: 'expected an error state report after underrun');
     });
 
     test('buildClientGoodbye forwards to protocol', () {
