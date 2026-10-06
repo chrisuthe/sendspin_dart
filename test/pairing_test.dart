@@ -143,6 +143,17 @@ void main() {
       expect(ids, isNot(contains('server-1')));
     });
 
+    test('the usage order survives a restart', () async {
+      final store = _MemoryStore();
+      final pairing = await SendspinPairing.load(store);
+      await pairing.addRecord(_record('server-a', 1));
+      await pairing.addRecord(_record('server-b', 2));
+      await pairing.markUsed('server-a');
+
+      final reloaded = await SendspinPairing.load(store);
+      expect(reloaded.records.map((r) => r.serverId), ['server-b', 'server-a']);
+    });
+
     test('never evicts a record backing an open connection', () async {
       final pairing = SendspinPairing.inMemory();
       for (var i = 0; i < 5; i++) {

@@ -262,8 +262,9 @@ class SendspinProtocol {
   /// follows.
   void Function(String reason)? onServerError;
 
-  /// Called when a pairing completes and the record for [serverId] has
-  /// been stored. The server normally re-handshakes to the new long-term PSK
+  /// Called when a pairing completes: the record for [serverId] is held and
+  /// is being written to the store ([onPairingStoreError] reports a failed
+  /// write). The server normally re-handshakes to the new long-term PSK
   /// straight afterwards.
   void Function(String serverId)? onPaired;
 
@@ -833,7 +834,9 @@ class SendspinProtocol {
     _pairingIndex = 0;
     _releasePairingRecord();
     if (result.matchedCategory == SendspinPskCategory.longTerm) {
-      pairing.markUsed(result.serverId);
+      pairing
+          .markUsed(result.serverId)
+          .catchError((Object e) => onPairingStoreError?.call(e));
       pairing.retain(result.serverId);
       _retainedServerId = result.serverId;
     }
@@ -845,6 +848,10 @@ class SendspinProtocol {
   }
 
   void _handleRehandshakeStarted() {
+    // A pairing attempt does not span a re-handshake: its pairing_index and
+    // matched PSK belong to the previous handshake. Ending it here also keeps
+    // a later abort from being held and released into the next attempt.
+    _endPairingAttempt();
     _rehandshaking = true;
     // The server must follow a re-handshake with server/activate; do not hold
     // messages and pause clock sync indefinitely if it never does.
@@ -1126,11 +1133,16 @@ class SendspinProtocol {
   /// `pair/abort` reason `user_cancelled`. Does nothing if none is running.
   void cancelPairing() => _abortPairing('user_cancelled');
 
-  /// Refuses this connection's pairing because another pairing attempt is
-  /// already in progress with this device, or because the device does not
-  /// admit a pairing connection alongside its admitted one: sends
-  /// `pair/abort` reason `concurrent_attempt` and closes.
+  /// Refuses this connection under the multiple-server admission rules, for
+  /// example because another pairing attempt is already in progress with
+  /// this device. A connection the server has declared as pairing gets
+  /// `pair/abort` reason `concurrent_attempt`; any other connection gets
+  /// `client/goodbye` reason `concurrent_attempt`. Either way it is closed.
   void rejectConcurrentPairing() {
+    if (!_activated || !_state.activities.contains(activityPairing)) {
+      return _goodbyeAndClose(SendspinGoodbyeReason.concurrentAttempt);
+    }
+    _endPairingAttempt();
     if (_channel.isEstablished) {
       _channel.sendJsonText(jsonEncode({
         'type': 'pair/abort',

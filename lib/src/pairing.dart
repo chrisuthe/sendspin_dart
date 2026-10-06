@@ -223,11 +223,13 @@ class SendspinPairing {
     return _save();
   }
 
-  /// Marks the record for [serverId] as the most recently used.
-  void markUsed(String serverId) {
+  /// Marks the record for [serverId] as the most recently used and persists
+  /// the new order, so eviction still follows usage after a restart.
+  Future<void> markUsed(String serverId) async {
     final index = _records.indexWhere((r) => r.serverId == serverId);
-    if (index < 0) return;
+    if (index < 0 || index == _records.length - 1) return;
     _records.add(_records.removeAt(index));
+    await _save();
   }
 
   /// Declares that an open connection is keyed by the record for

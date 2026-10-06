@@ -349,15 +349,69 @@ void main() {
       expect(f.closes, isEmpty);
     });
 
-    test('rejectConcurrentPairing aborts with concurrent_attempt and closes',
-        () {
+    test('rejectConcurrentPairing aborts a pairing connection and closes', () {
       final f = _Fixture.pairingSession();
+      f.server.sendJson('server/activate', _pairingActivation);
+      f.server.receivedJson.clear();
       f.protocol.rejectConcurrentPairing();
+
       expect(f.sent.single, {
         'type': 'pair/abort',
         'payload': {'reason': 'concurrent_attempt'},
       });
       expect(f.closes, hasLength(1));
+      expect(f.pairing.records, isEmpty);
+    });
+
+    test('rejecting a connection that is not pairing says goodbye instead', () {
+      final f = _Fixture.pairingSession();
+      f.server.sendJson('server/activate', {'activities': <String>[]});
+      f.server.receivedJson.clear();
+      f.protocol.rejectConcurrentPairing();
+
+      expect(f.sent.single, {
+        'type': 'client/goodbye',
+        'payload': {'reason': 'concurrent_attempt'},
+      });
+      expect(f.closes, hasLength(1));
+    });
+
+    test('rejecting before the first activation says goodbye', () {
+      final f = _Fixture.pairingSession();
+      f.protocol.rejectConcurrentPairing();
+      expect(f.sent.single['type'], 'client/goodbye');
+      expect(f.closes, hasLength(1));
+    });
+  });
+
+  group('pairing and re-handshake', () {
+    test('an abort is not carried over a re-handshake into the next attempt',
+        () {
+      final f = _Fixture.pairingSession();
+      f.server.sendJson('server/activate', _pairingActivation);
+      f.server.receivedJson.clear();
+
+      // The server re-handshakes while the attempt is still open; the
+      // operator cancels inside that window.
+      f.server.startRehandshake(_pairingPsk, 'pr');
+      f.protocol.cancelPairing();
+      f.server.sendJson('server/activate', _pairingActivation);
+
+      expect(f.sentTypes, ['client/pair-init', 'client/pair-finalize'],
+          reason: 'no stale pair/abort ahead of the new attempt');
+    });
+
+    test('a re-handshake ends the attempt, so no timeout fires later', () {
+      fakeAsync((async) {
+        final f = _Fixture.pairingSession();
+        f.server.sendJson('server/activate', _pairingActivation);
+        f.server.startRehandshake(_pairingPsk, 'pr');
+        f.server.sendJson('server/activate', {'activities': <String>[]});
+        f.server.receivedJson.clear();
+        async.elapse(const Duration(minutes: 5));
+        expect(f.sent, isEmpty);
+        f.protocol.dispose();
+      });
     });
   });
 
