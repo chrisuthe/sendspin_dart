@@ -3,6 +3,24 @@
 Breaking: this release moves the library to the Sendspin 1.0.0-rc1 wire
 protocol. It cannot talk to pre-rc1 servers.
 
+### Identity: client_id is a Curve25519 public key
+
+- `SendspinProtocol` and `SendspinPlayer` take `identity:` (a
+  `SendspinIdentity`) instead of a free-form `clientId:` string. `clientId`
+  is now a getter returning the public key as 43-character unpadded
+  base64url.
+- New `SendspinIdentity` (`generate`, `fromPrivateKey`, `loadOrCreate`) and
+  the `SendspinIdentityStore` interface the consumer implements to persist
+  the private key. The library does not choose a storage location.
+- `loadOrCreate` only generates a key when the store is empty, and throws on
+  a stored key of the wrong length instead of replacing it, so a bad read
+  cannot rotate the device's identity.
+- **Migration:** existing deployments get a new identity. Servers will see
+  each upgraded device as a new client, so group membership and per-player
+  settings keyed on the old `client_id` do not carry over.
+- New dependency: `package:cryptography` (pure Dart). The minimum Dart SDK
+  moves from 3.0 to 3.3.
+
 ### Player audio chunks
 
 - Audio chunks (binary ID 4) now use the 13-byte rc1 header. `AudioFrame`

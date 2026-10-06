@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'protocol.dart';
 import 'buffer.dart';
 import 'codec.dart';
+import 'identity.dart';
 import 'models.dart';
 
 /// High-level audio player that composes [SendspinProtocol] with a codec and
@@ -37,7 +38,7 @@ class SendspinPlayer {
 
   SendspinPlayer({
     required String playerName,
-    required String clientId,
+    required SendspinIdentity identity,
     required int bufferSeconds,
     DeviceInfo deviceInfo = const DeviceInfo(),
     List<AudioFormat> supportedFormats = const [
@@ -51,7 +52,7 @@ class SendspinPlayer {
   })  : bufferSeconds = bufferSeconds,
         protocol = SendspinProtocol(
           playerName: playerName,
-          clientId: clientId,
+          identity: identity,
           bufferSeconds: bufferSeconds,
           deviceInfo: deviceInfo,
           supportedFormats: supportedFormats,
@@ -65,6 +66,8 @@ class SendspinPlayer {
   // ---------------------------------------------------------------------------
   // Delegated getters / setters
   // ---------------------------------------------------------------------------
+
+  String get clientId => protocol.clientId;
 
   SendspinPlayerState get state => protocol.state;
   Stream<SendspinPlayerState> get stateStream => protocol.stateStream;

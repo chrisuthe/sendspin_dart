@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:sendspin_dart/sendspin_dart.dart';
 
+import 'test_identity.dart';
+
 /// Helper: builds a stream/start JSON message.
 String _streamStart({
   String codec = 'pcm',
@@ -95,7 +97,7 @@ void main() {
     setUp(() {
       player = SendspinPlayer(
         playerName: 'Test Player',
-        clientId: 'test-id',
+        identity: testIdentity,
         bufferSeconds: 5,
       );
       // Swallow outgoing text messages.
@@ -210,7 +212,7 @@ void main() {
       final fakeCodec = _FakeCodec();
       final customPlayer = SendspinPlayer(
         playerName: 'Custom',
-        clientId: 'custom-id',
+        identity: testIdentity,
         bufferSeconds: 5,
         codecFactory: (codec, bitDepth, channels, sampleRate) => fakeCodec,
       );
@@ -238,7 +240,7 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], 'test-id');
+      expect(payload['client_id'], testIdentity.clientId);
       expect(payload['name'], 'Test Player');
     });
 
@@ -301,7 +303,7 @@ void main() {
     test('initialStaticDelayMs is exposed via staticDelayMs getter', () {
       final p = SendspinPlayer(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: 800,
       );
@@ -313,7 +315,7 @@ void main() {
     test('initialStaticDelayMs applies to fresh buffer on stream/start', () {
       final p = SendspinPlayer(
         playerName: 'Test',
-        clientId: 'id',
+        identity: testIdentity,
         bufferSeconds: 5,
         initialStaticDelayMs: 500,
       );
@@ -503,7 +505,7 @@ void main() {
     test('additionalRoles are passed through to protocol', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller, SendspinRole.metadata},
       );
@@ -521,7 +523,7 @@ void main() {
     test('player role is always included even if not in additionalRoles', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
@@ -533,7 +535,7 @@ void main() {
     test('artwork additionalRole with channels is passed to protocol', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -557,7 +559,7 @@ void main() {
     test('sendControllerCommand delegates to protocol', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
@@ -578,7 +580,7 @@ void main() {
     test('sendControllerVolume delegates to protocol', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
@@ -599,7 +601,7 @@ void main() {
     test('sendControllerMute delegates to protocol', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.controller},
       );
@@ -620,7 +622,7 @@ void main() {
     test('onArtworkFrame callback fires via player delegation', () {
       final p = SendspinPlayer(
         playerName: 'Full',
-        clientId: 'c',
+        identity: testIdentity,
         bufferSeconds: 5,
         additionalRoles: const {SendspinRole.artwork},
         artworkChannels: const [
