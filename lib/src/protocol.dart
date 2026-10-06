@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'activation.dart';
 import 'arrival_delay.dart';
+import 'channel.dart';
 import 'identity.dart';
 import 'models.dart';
 import 'clock.dart';
+import 'psk.dart';
 import 'time_burst.dart';
 
 /// Reason codes for the client/goodbye message (Sendspin spec).
@@ -13,7 +16,11 @@ enum SendspinGoodbyeReason {
   anotherServer('another_server'),
   shutdown('shutdown'),
   restart('restart'),
-  userRequest('user_request');
+  userRequest('user_request'),
+  unauthorized('unauthorized'),
+  pairingRequired('pairing_required'),
+  concurrentAttempt('concurrent_attempt'),
+  unpaired('unpaired');
 
   final String wireValue;
   const SendspinGoodbyeReason(this.wireValue);
@@ -64,11 +71,23 @@ class DeviceInfo {
   final String manufacturer;
   final String softwareVersion;
 
+  /// MAC address of the network interface the connection is opened on, in
+  /// lowercase colon-separated form (`aa:bb:cc:dd:ee:ff`). Optional.
+  final String? macAddress;
+
   const DeviceInfo({
     this.productName = 'sendspin_dart',
     this.manufacturer = 'sendspin_dart',
     this.softwareVersion = '0.1.0',
+    this.macAddress,
   });
+
+  Map<String, dynamic> toJson() => {
+        'product_name': productName,
+        'manufacturer': manufacturer,
+        'software_version': softwareVersion,
+        if (macAddress != null) 'mac_address': macAddress,
+      };
 }
 
 /// Audio format description for supported codec negotiation.
@@ -95,10 +114,20 @@ class AudioFormat {
 
 /// Sendspin protocol state machine.
 ///
-/// Handles all text message parsing/building, binary frame parsing, clock sync,
-/// connection state management, volume/mute commands, and periodic state
-/// reporting. Does NOT create codecs, buffer audio, decode audio, or provide
-/// pullSamples() — those concerns belong to the player layer.
+/// Handles the encrypted channel, message parsing/building, binary frame
+/// parsing, clock sync, connection state management, volume/mute commands,
+/// and periodic state reporting. Does NOT create codecs, buffer audio, decode
+/// audio, or provide pullSamples() — those concerns belong to the player
+/// layer.
+///
+/// Transport is injected. Wire [onSendText] and [onSendBinary] to a
+/// WebSocket, feed its messages to [handleTextMessage] and
+/// [handleBinaryMessage], call [start] once the socket is open, and close
+/// the socket when [onClose] fires.
+///
+/// The connection sequence is: `client/init`, `server/init` and the Noise
+/// handshake in cleartext, then encrypted `server/hello`, `client/hello` and
+/// `server/activate`. Nothing else is sent until that first activation.
 class SendspinProtocol {
   final String playerName;
 
@@ -128,6 +157,27 @@ class SendspinProtocol {
 
   final ArrivalDelayTracker _arrivalDelay = ArrivalDelayTracker();
 
+  late final SendspinChannel _channel;
+  bool _unpairedAccess;
+
+  /// The outcome of the latest Noise handshake on this connection.
+  SendspinHandshakeResult? _handshake;
+  bool _helloReceived = false;
+
+  /// Set by the first admissible `server/activate`. Until then the client
+  /// sends nothing but `client/hello` (and, if it must, `client/goodbye`).
+  bool _activated = false;
+
+  /// Between a re-handshake starting and the `server/activate` that follows
+  /// it, no new application message may be sent; they wait in [_held].
+  bool _rehandshaking = false;
+  final List<String> _held = [];
+  bool _clockSyncPaused = false;
+  bool _playerStreamActive = false;
+
+  /// Drops a connection whose server never declares its purpose.
+  Timer? _activateTimer;
+
   int _staticDelayMs = 0;
   bool _pipelineError = false;
 
@@ -146,8 +196,28 @@ class SendspinProtocol {
   // Callbacks
   // -------------------------------------------------------------------------
 
-  /// Callback for sending text messages back through the WebSocket.
+  /// Sends a WebSocket text message. Only the cleartext opening of the
+  /// connection (`client/init` and the Noise handshake reply) uses text.
   void Function(String message)? onSendText;
+
+  /// Sends a WebSocket binary message. Everything after the handshake is an
+  /// encrypted binary message, JSON included.
+  void Function(Uint8List data)? onSendBinary;
+
+  /// The connection is finished and the WebSocket must be closed: the
+  /// handshake or an encrypted message failed, the server refused
+  /// `client/init`, or the client said goodbye. [reason] is for logging.
+  void Function(String reason)? onClose;
+
+  /// Called when the server refuses `client/init` with `server/error`
+  /// (`unsupported_version`, `unsupported_suite` or `malformed`). [onClose]
+  /// follows.
+  void Function(String reason)? onServerError;
+
+  /// Called after each admissible `server/activate` has been applied, with
+  /// the connection's activities and active roles. Also readable from
+  /// [state].
+  void Function(Set<String> activities, List<String> activeRoles)? onActivate;
 
   /// Called when stream/start is received with the negotiated audio format.
   void Function(StreamConfig config)? onStreamConfig;
@@ -197,9 +267,13 @@ class SendspinProtocol {
     ],
     this.roles = const {SendspinRole.player},
     this.artworkChannels,
+    required bool unpairedAccess,
+    List<SendspinPskCandidate> Function()? pskCandidates,
+    this.activateTimeout = const Duration(seconds: 30),
     int initialStaticDelayMs = 0,
     int Function()? now,
-  }) : _now = now {
+  })  : _now = now,
+        _unpairedAccess = unpairedAccess {
     if (roles.contains(SendspinRole.artwork) &&
         (artworkChannels == null || artworkChannels!.isEmpty)) {
       throw ArgumentError(
@@ -212,7 +286,20 @@ class SendspinProtocol {
     _state = _state.copyWith(staticDelayMs: _staticDelayMs);
     _timeBurst = SendspinTimeBurst(now: nowUs);
     _wireTimeBurst();
+    _channel = SendspinChannel(identity: identity, pskCandidates: pskCandidates)
+      ..onSendText = ((text) => onSendText?.call(text))
+      ..onSendBinary = ((data) => onSendBinary?.call(data))
+      ..onJson = _dispatchJson
+      ..onBinary = _dispatchBinary
+      ..onHandshakeComplete = _handleHandshakeComplete
+      ..onRehandshakeStarted = _handleRehandshakeStarted
+      ..onServerError = ((reason) => onServerError?.call(reason))
+      ..onClose = _handleChannelClosed;
   }
+
+  /// How long to wait for the first `server/activate` after the handshake
+  /// before dropping the connection.
+  final Duration activateTimeout;
 
   /// Local monotonic clock in microseconds. All client-side timestamps
   /// (filter `time_added`, NTP `client_transmitted`/`client_received`, and
@@ -222,7 +309,7 @@ class SendspinProtocol {
 
   void _wireTimeBurst() {
     _timeBurst.onSendTimeMessage = (clientTransmittedUs) {
-      onSendText?.call(buildClientTime(clientTransmittedUs));
+      _sendApplication(buildClientTime(clientTransmittedUs));
     };
     _timeBurst.onApplyBestSample = (offset, maxError, timeAdded) {
       _clock.update(offset, maxError, timeAdded);
@@ -243,6 +330,37 @@ class SendspinProtocol {
   /// The `client_id` sent to servers: the identity's public key as unpadded
   /// base64url.
   String get clientId => identity.clientId;
+
+  /// Whether this client admits unpaired access: a server with no pairing
+  /// record activating roles or declaring playback. Advertised in
+  /// `client/hello`.
+  bool get unpairedAccess => _unpairedAccess;
+
+  /// Changes the unpaired-access setting. Turning it off closes a connection
+  /// that relies on it with `client/goodbye` reason `pairing_required`. The
+  /// new value is advertised in the next `client/hello`.
+  set unpairedAccess(bool enabled) {
+    if (_unpairedAccess == enabled) return;
+    _unpairedAccess = enabled;
+    final handshake = _handshake;
+    if (enabled || handshake == null || !_activated) return;
+    final relies = handshake.matchedCategory != SendspinPskCategory.longTerm &&
+        (_state.activities.contains(activityPlayback) ||
+            _state.activeRoles.isNotEmpty);
+    if (relies) _goodbyeAndClose(SendspinGoodbyeReason.pairingRequired);
+  }
+
+  /// The `server_id` of the connected server, once the handshake completed.
+  String? get serverId => _handshake?.serverId;
+
+  /// Whether the session is paired: the handshake matched a long-term PSK
+  /// from a pairing record.
+  bool get isPaired =>
+      _handshake?.matchedCategory == SendspinPskCategory.longTerm;
+
+  /// The pairing methods offered in `client/hello`, each with the emission
+  /// formats it offers.
+  Map<String, Set<String>> get _offeredPairMethods => const {'pairing_psk': {}};
 
   /// The clock filter, exposed for consumers that need time conversion.
   SendspinClock get clock => _clock;
@@ -299,39 +417,25 @@ class SendspinProtocol {
   // Message builders
   // -------------------------------------------------------------------------
 
-  /// Builds the client/hello handshake message per the Sendspin spec.
+  /// Builds the `client/hello` message, sent in response to `server/hello`.
+  ///
+  /// `client_id` and `version` are not here: they travel in `client/init`.
   String buildClientHello() {
     final payload = <String, dynamic>{
-      'client_id': identity.clientId,
       'name': playerName,
-      'version': 1,
+      'device_info': deviceInfo.toJson(),
       'supported_roles': roles.map((r) => r.wireValue).toList(),
-      'device_info': {
-        'product_name': deviceInfo.productName,
-        'manufacturer': deviceInfo.manufacturer,
-        'software_version': deviceInfo.softwareVersion,
+      if (roles.contains(SendspinRole.player))
+        'player@v1_support': {
+          'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
+          'buffer_capacity': _computeBufferCapacityBytes(),
+        },
+      'supported_pair_methods': {
+        for (final method in _offeredPairMethods.keys)
+          method: <String, dynamic>{},
       },
+      'unpaired_access': {'enabled': _unpairedAccess},
     };
-
-    if (roles.contains(SendspinRole.player)) {
-      payload['player@v1_support'] = {
-        'supported_formats': supportedFormats.map((f) => f.toJson()).toList(),
-        'buffer_capacity': _computeBufferCapacityBytes(),
-        // Spec: player@v1_support.supported_commands is a subset of
-        // {'volume', 'mute'}. set_static_delay belongs in client/state's
-        // player.supported_commands, not in the hello support object.
-        // MA's Sendspin server closes the connection (WS close 1000) on
-        // hellos that advertise set_static_delay here.
-        'supported_commands': ['volume', 'mute'],
-      };
-    }
-
-    if (roles.contains(SendspinRole.artwork)) {
-      payload['artwork@v1_support'] = {
-        'channels': artworkChannels!.map((c) => c.toJson()).toList(),
-      };
-    }
-
     return jsonEncode({'type': 'client/hello', 'payload': payload});
   }
 
@@ -384,12 +488,33 @@ class SendspinProtocol {
     });
   }
 
-  /// Sends a client/goodbye message via [onSendText].
+  /// Sends `client/goodbye`, encrypted. Allowed as soon as the initial
+  /// Noise handshake has completed; before that there is no channel to send
+  /// it on and the call does nothing.
   ///
   /// The consumer remains responsible for closing the underlying transport
   /// after this returns.
   void sendGoodbye(SendspinGoodbyeReason reason) {
-    onSendText?.call(buildClientGoodbye(reason));
+    if (!_channel.isEstablished) return;
+    _channel.sendJsonText(buildClientGoodbye(reason));
+  }
+
+  /// Says goodbye and asks the consumer to close the socket.
+  void _goodbyeAndClose(SendspinGoodbyeReason reason) {
+    sendGoodbye(reason);
+    _channel.close('client/goodbye ${reason.wireValue}');
+  }
+
+  /// Sends an application message, subject to the sequencing rules: nothing
+  /// before the first `server/activate`, and nothing new between a
+  /// re-handshake and the activation that follows it.
+  void _sendApplication(String json) {
+    if (!_activated || !_channel.isEstablished) return;
+    if (_rehandshaking) {
+      _held.add(json);
+      return;
+    }
+    _channel.sendJsonText(json);
   }
 
   /// Sets the pipeline error flag and immediately reports state if changed.
@@ -399,13 +524,16 @@ class SendspinProtocol {
   void setPipelineError(bool error) {
     if (_pipelineError == error) return;
     _pipelineError = error;
-    onSendText?.call(buildClientState());
+    _sendApplication(buildClientState());
   }
 
+  /// Whether the server has activated [role] on this connection.
+  bool isRoleActive(SendspinRole role) =>
+      _state.activeRoles.contains(role.wireValue);
+
   void _requireRole(SendspinRole role) {
-    if (!roles.contains(role)) {
-      throw StateError(
-          '${role.wireValue} role is required but not in the role set');
+    if (!isRoleActive(role)) {
+      throw StateError('${role.wireValue} role is not active');
     }
   }
 
@@ -414,7 +542,7 @@ class SendspinProtocol {
   /// Throws [StateError] if the controller role is not active.
   void sendControllerCommand(String command) {
     _requireRole(SendspinRole.controller);
-    onSendText?.call(jsonEncode({
+    _sendApplication(jsonEncode({
       'type': 'client/command',
       'payload': {
         'controller': {'command': command},
@@ -429,7 +557,7 @@ class SendspinProtocol {
   void sendControllerVolume(int volume) {
     _requireRole(SendspinRole.controller);
     RangeError.checkValueInInterval(volume, 0, 100, 'volume');
-    onSendText?.call(jsonEncode({
+    _sendApplication(jsonEncode({
       'type': 'client/command',
       'payload': {
         'controller': {'command': 'volume', 'volume': volume},
@@ -442,7 +570,7 @@ class SendspinProtocol {
   /// Throws [StateError] if the controller role is not active.
   void sendControllerMute(bool mute) {
     _requireRole(SendspinRole.controller);
-    onSendText?.call(jsonEncode({
+    _sendApplication(jsonEncode({
       'type': 'client/command',
       'payload': {
         'controller': {'command': 'mute', 'mute': mute},
@@ -453,42 +581,208 @@ class SendspinProtocol {
   /// Update volume from local UI and report to server.
   void updateVolume(double volume) {
     _updateState(_state.copyWith(volume: volume.clamp(0.0, 1.0)));
-    onSendText?.call(buildClientState());
+    _sendApplication(buildClientState());
   }
 
   // -------------------------------------------------------------------------
-  // Text message handling
+  // Connection
   // -------------------------------------------------------------------------
 
-  /// Dispatches an incoming JSON text message by its `type` field.
-  void handleTextMessage(String text) {
-    final Map<String, dynamic> msg;
-    try {
-      msg = jsonDecode(text) as Map<String, dynamic>;
-    } catch (e) {
-      return;
-    }
+  /// Begins the connection by sending `client/init`. Call once the WebSocket
+  /// is open, after wiring [onSendText] and [onSendBinary].
+  void start() {
+    _updateState(
+        _state.copyWith(connectionState: SendspinConnectionState.connected));
+    _channel.start();
+  }
 
-    final type = msg['type'] as String?;
-    final payload = msg['payload'] as Map<String, dynamic>? ?? {};
+  /// Handles an incoming WebSocket text message. Text is only valid during
+  /// the cleartext opening of the connection.
+  void handleTextMessage(String text) => _channel.handleText(text);
+
+  /// Handles an incoming WebSocket binary message: one encrypted message.
+  void handleBinaryMessage(Uint8List data) => _channel.handleBinary(data);
+
+  void _handleHandshakeComplete(SendspinHandshakeResult result) {
+    _handshake = result;
+    if (result.isRehandshake) return;
+    _updateState(_state.copyWith(serverId: result.serverId));
+    _activateTimer = Timer(activateTimeout, () {
+      _channel.close('no server/activate within the timeout');
+    });
+  }
+
+  void _handleRehandshakeStarted() {
+    _rehandshaking = true;
+    // A client/time held until after the re-handshake would measure the hold,
+    // not the network, so pause the burst driver instead.
+    if (_timeBurst.isStarted) {
+      _clockSyncPaused = true;
+      _timeBurst.stop();
+    }
+  }
+
+  void _handleChannelClosed(String reason) {
+    _stopTimers();
+    _updateState(
+        _state.copyWith(connectionState: SendspinConnectionState.disconnected));
+    onClose?.call(reason);
+  }
+
+  void _stopTimers() {
+    _activateTimer?.cancel();
+    _activateTimer = null;
+    _timeBurst.stop();
+    _clockSyncPaused = false;
+    _stopStateReporting();
+  }
+
+  /// Dispatches a decrypted JSON message by its `type`. Unrecognized types
+  /// are ignored.
+  void _dispatchJson(Map<String, dynamic> msg) {
+    final type = msg['type'] as String;
+    final payload = msg['payload'] as Map<String, dynamic>;
+
+    if (type == 'server/hello') return _handleServerHello(payload);
+    if (type == 'server/activate') return _handleServerActivate(payload);
+    // The server sends nothing else before its first activation.
+    if (!_activated) return;
 
     switch (type) {
-      case 'server/hello':
-        _handleServerHello(payload);
       case 'server/time':
         _handleServerTime(payload);
       case 'stream/start':
         _handleStreamStart(payload);
       case 'stream/clear':
-        _handleStreamClear();
+        _handleStreamClear(payload);
       case 'stream/end':
-        _handleStreamEnd();
+        _handleStreamEnd(payload);
       case 'server/command':
         _handleServerCommand(payload);
       case 'server/state':
         _handleServerState(payload);
       case 'group/update':
         _handleGroupUpdate(payload);
+    }
+  }
+
+  void _handleServerHello(Map<String, dynamic> payload) {
+    // Sent once per connection; not re-sent after a re-handshake.
+    if (_helloReceived) return;
+    _helloReceived = true;
+    _updateState(_state.copyWith(
+      connectionState: SendspinConnectionState.syncing,
+      serverName: payload['name'] as String? ?? 'Unknown',
+    ));
+    _channel.sendJsonText(buildClientHello());
+  }
+
+  void _handleServerActivate(Map<String, dynamic> payload) {
+    final handshake = _handshake;
+    if (handshake == null || !_helloReceived) return;
+
+    final rawActivities = payload['activities'];
+    final activities = rawActivities is List
+        ? rawActivities.whereType<String>().toSet()
+        : const <String>{};
+    final rawRoles = payload['active_roles'];
+    final explicitRoles =
+        rawRoles is List ? rawRoles.whereType<String>().toList() : null;
+    // The pairing object only matters when pairing is a declared activity.
+    final pairing = activities.contains(activityPairing)
+        ? payload['pairing'] as Map<String, dynamic>?
+        : null;
+
+    final verdict = evaluateActivation(
+      matched: handshake.matchedCategory,
+      unpairedAccess: _unpairedAccess,
+      activities: activities,
+      activeRoles: explicitRoles,
+      pairingMethod: pairing?['method'] as String?,
+      pairingFormat: pairing?['format'] as String?,
+      offeredPairMethods: _offeredPairMethods,
+    );
+    switch (verdict) {
+      case ActivationVerdict.pairingRequired:
+        return _goodbyeAndClose(SendspinGoodbyeReason.pairingRequired);
+      case ActivationVerdict.unauthorized:
+        return _goodbyeAndClose(SendspinGoodbyeReason.unauthorized);
+      case ActivationVerdict.methodNotSupported:
+        _channel.sendJsonText(jsonEncode({
+          'type': 'pair/abort',
+          'payload': {'reason': 'method_not_supported'},
+        }));
+        return;
+      case ActivationVerdict.admissible:
+        break;
+    }
+
+    // `active_roles` persists when a later activation omits it, except that
+    // roles do not survive on a connection that is no longer playback-capable.
+    // A first activation that omits it carries an empty list.
+    final List<String> newRoles;
+    if (explicitRoles != null) {
+      newRoles = explicitRoles;
+    } else if (_activated &&
+        isPlaybackCapable(
+            handshake.matchedCategory, _unpairedAccess, activities)) {
+      newRoles = _state.activeRoles;
+    } else {
+      newRoles = const [];
+    }
+
+    final previousRoles = _state.activeRoles;
+    final removed = previousRoles.where((r) => !newRoles.contains(r)).toList();
+    final added = newRoles.where((r) => !previousRoles.contains(r)).toList();
+    for (final role in removed) {
+      _handleRoleRemoved(role);
+    }
+
+    _updateState(
+        _state.copyWith(activities: activities, activeRoles: newRoles));
+
+    final firstActivation = !_activated;
+    _activated = true;
+    _activateTimer?.cancel();
+    _activateTimer = null;
+
+    if (_rehandshaking) {
+      // The restriction on new application messages ends here.
+      _rehandshaking = false;
+      final held = List<String>.of(_held);
+      _held.clear();
+      held.forEach(_channel.sendJsonText);
+      if (_clockSyncPaused) {
+        _clockSyncPaused = false;
+        _timeBurst.start();
+      }
+    }
+
+    if (firstActivation) startClockSync();
+
+    // A role that defines a client/state object must be reported when it
+    // becomes active, and a client with any active role sends an initial
+    // client/state.
+    if (added.isNotEmpty || (firstActivation && newRoles.isNotEmpty)) {
+      _sendApplication(buildClientState());
+    }
+
+    onActivate?.call(activities, newRoles);
+  }
+
+  /// Applies the removal of [role] from `active_roles`: stream roles stop
+  /// output and clear their buffers, state roles discard their state and any
+  /// pending scheduled update. No preceding message from the server is
+  /// required for either.
+  void _handleRoleRemoved(String role) {
+    if (role == SendspinRole.player.wireValue) {
+      _endPlayerStream();
+    } else if (role == SendspinRole.metadata.wireValue) {
+      _discardMetadata();
+    } else if (role == SendspinRole.controller.wireValue) {
+      if (_state.controller != null) {
+        _updateState(_state.copyWith(clearController: true));
+      }
     }
   }
 
@@ -501,26 +795,6 @@ class SendspinProtocol {
     );
     _updateState(_state.copyWith(groupState: groupState));
     onGroupUpdate?.call(groupState);
-  }
-
-  void _handleServerHello(Map<String, dynamic> payload) {
-    final serverName = payload['name'] as String? ?? 'Unknown';
-    final connectionReason = SendspinConnectionReason.fromWire(
-        payload['connection_reason'] as String?);
-    final activeRoles =
-        (payload['active_roles'] as List?)?.whereType<String>().toList() ??
-            const <String>[];
-
-    _updateState(_state.copyWith(
-      connectionState: SendspinConnectionState.syncing,
-      serverName: serverName,
-      connectionReason: connectionReason,
-      activeRoles: activeRoles,
-    ));
-
-    // Send initial state report, then start clock sync.
-    onSendText?.call(buildClientState());
-    startClockSync();
   }
 
   void _handleServerTime(Map<String, dynamic> payload) {
@@ -544,10 +818,8 @@ class SendspinProtocol {
   }
 
   void _handleStreamStart(Map<String, dynamic> payload) {
-    // Spec nests format under "player"; fall back to top-level for compat.
-    final playerFormat = payload['player'] as Map<String, dynamic>?;
-    final audioFormat =
-        playerFormat ?? payload['audio_format'] as Map<String, dynamic>? ?? {};
+    final audioFormat = payload['player'] as Map<String, dynamic>?;
+    if (audioFormat == null || !isRoleActive(SendspinRole.player)) return;
     final codecName = audioFormat['codec'] as String? ?? 'pcm';
     final channels = audioFormat['channels'] as int? ?? 2;
     final sampleRate = audioFormat['sample_rate'] as int? ?? 48000;
@@ -561,6 +833,7 @@ class SendspinProtocol {
       channels: channels,
     ));
 
+    _playerStreamActive = true;
     _startStateReporting();
 
     onStreamConfig?.call(StreamConfig(
@@ -573,11 +846,28 @@ class SendspinProtocol {
     ));
   }
 
-  void _handleStreamClear() {
+  /// Whether a `stream/clear` or `stream/end` targets the player role: it is
+  /// listed in `roles`, or `roles` is omitted (all active streams).
+  static bool _targetsPlayer(Map<String, dynamic> payload) {
+    final roles = payload['roles'];
+    return roles is! List || roles.contains('player');
+  }
+
+  void _handleStreamClear(Map<String, dynamic> payload) {
+    if (!_playerStreamActive || !_targetsPlayer(payload)) return;
     onStreamClear?.call();
   }
 
-  void _handleStreamEnd() {
+  void _handleStreamEnd(Map<String, dynamic> payload) {
+    if (!_playerStreamActive || !_targetsPlayer(payload)) return;
+    _endPlayerStream();
+  }
+
+  /// Stops player output: on `stream/end`, and when the player role is
+  /// removed (even if an earlier `stream/end` already ended the stream, so
+  /// buffered audio that was still finishing is cleared too).
+  void _endPlayerStream() {
+    _playerStreamActive = false;
     _stopStateReporting();
 
     _updateState(_state.copyWith(
@@ -589,7 +879,7 @@ class SendspinProtocol {
 
   void _handleServerCommand(Map<String, dynamic> payload) {
     final player = payload['player'] as Map<String, dynamic>?;
-    if (player == null) return;
+    if (player == null || !isRoleActive(SendspinRole.player)) return;
 
     final command = player['command'] as String?;
     switch (command) {
@@ -598,14 +888,14 @@ class SendspinProtocol {
         if (vol is num) {
           final normalized = vol.toDouble() / 100;
           _updateState(_state.copyWith(volume: normalized));
-          onSendText?.call(buildClientState());
+          _sendApplication(buildClientState());
           onVolumeChanged?.call(normalized, _state.muted);
         }
       case 'mute':
         final muted = player['mute'] as bool?;
         if (muted != null) {
           _updateState(_state.copyWith(muted: muted));
-          onSendText?.call(buildClientState());
+          _sendApplication(buildClientState());
           onVolumeChanged?.call(_state.volume, muted);
         }
       case 'set_static_delay':
@@ -613,7 +903,7 @@ class SendspinProtocol {
         if (delayMs != null) {
           _staticDelayMs = delayMs.clamp(0, 5000);
           _updateState(_state.copyWith(staticDelayMs: _staticDelayMs));
-          onSendText?.call(buildClientState());
+          _sendApplication(buildClientState());
           onStaticDelayChanged?.call(_staticDelayMs);
         }
     }
@@ -622,7 +912,9 @@ class SendspinProtocol {
   void _handleServerState(Map<String, dynamic> payload) {
     // Each role object carries that role's full state; an omitted object
     // leaves the role's state, and any pending scheduled update, unchanged.
-    final metadataJson = payload['metadata'] as Map<String, dynamic>?;
+    final metadataJson = isRoleActive(SendspinRole.metadata)
+        ? payload['metadata'] as Map<String, dynamic>?
+        : null;
     // `timestamp` is required; without it the state cannot be placed in time
     // or have its progress extrapolated, so the object is ignored.
     if (metadataJson != null && metadataJson['timestamp'] is num) {
@@ -632,8 +924,9 @@ class SendspinProtocol {
       _evaluatePendingMetadata();
     }
 
-    final controller =
-        _parseController(payload['controller'] as Map<String, dynamic>?);
+    final controller = isRoleActive(SendspinRole.controller)
+        ? _parseController(payload['controller'] as Map<String, dynamic>?)
+        : null;
     if (controller != null) {
       _updateState(_state.copyWith(controller: controller));
       onControllerUpdate?.call(controller);
@@ -694,22 +987,21 @@ class SendspinProtocol {
   // Binary message handling
   // -------------------------------------------------------------------------
 
-  /// Handles an incoming binary message, dispatching by message ID and
-  /// active roles.
+  /// Dispatches a decrypted binary message by message ID and active roles.
   ///
   /// Audio chunks (ID 4) are forwarded to [onAudioFrame] only when the
   /// [SendspinRole.player] role is active. The remaining player IDs (5-7) are
   /// not defined and are ignored. Artwork frames (ID 8-11) are forwarded to
   /// [onArtworkFrame] only when [SendspinRole.artwork] is active. All other
   /// IDs are silently dropped.
-  void handleBinaryMessage(Uint8List data) {
-    if (data.isEmpty) return;
+  void _dispatchBinary(Uint8List data) {
+    if (data.isEmpty || !_activated) return;
     final type = data[0];
 
     if (type >= _binaryTypePlayerMin && type <= _binaryTypePlayerMax) {
       if (type != _binaryTypeAudioChunk) return;
       if (data.length < _audioChunkHeaderSize) return;
-      if (!roles.contains(SendspinRole.player)) return;
+      if (!isRoleActive(SendspinRole.player)) return;
       final frame = parseBinaryFrame(data);
       _measureArrivalDelay(frame);
       onAudioFrame?.call(frame);
@@ -718,7 +1010,7 @@ class SendspinProtocol {
 
     if (type >= _binaryTypeArtworkMin && type <= _binaryTypeArtworkMax) {
       if (data.length < 9) return;
-      if (roles.contains(SendspinRole.artwork)) {
+      if (isRoleActive(SendspinRole.artwork)) {
         final view =
             ByteData.view(data.buffer, data.offsetInBytes, data.lengthInBytes);
         onArtworkFrame?.call(ArtworkFrame(
@@ -802,17 +1094,33 @@ class SendspinProtocol {
   /// Stops all periodic timers and resets the clock so nothing is sent
   /// on the new socket before the server/hello handshake completes.
   void resetForNewConnection() {
+    _channel.reset();
+    _activateTimer?.cancel();
+    _activateTimer = null;
+    _handshake = null;
+    _helloReceived = false;
+    _activated = false;
+    _rehandshaking = false;
+    _clockSyncPaused = false;
+    _playerStreamActive = false;
+    _held.clear();
     _timeBurst.reset();
     _stopStateReporting();
     _clock.reset();
     _arrivalDelay.reset();
     _discardMetadata();
+    _state = SendspinPlayerState(
+      volume: _state.volume,
+      muted: _state.muted,
+      staticDelayMs: _state.staticDelayMs,
+    );
+    _stateController.add(_state);
   }
 
   /// Cleans up timers and stream controller.
   void dispose() {
-    stopClockSync();
-    _stopStateReporting();
+    _channel.reset();
+    _stopTimers();
     _discardMetadata();
     _stateController.close();
   }

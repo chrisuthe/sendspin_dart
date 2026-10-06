@@ -3,6 +3,50 @@
 Breaking: this release moves the library to the Sendspin 1.0.0-rc1 wire
 protocol. It cannot talk to pre-rc1 servers.
 
+### Encrypted transport and connection sequence
+
+- Every connection is now encrypted with Noise `KKpsk2`
+  (`25519_ChaChaPoly_SHA256`). The client sends `client/init`, reads
+  `server/init` and Noise message 1, answers with message 2, and from then on
+  every message is an encrypted WebSocket **binary** message: JSON is binary
+  message ID 0 and messages over 65518 bytes are fragmented as ID 1.
+- New consumer wiring: call `start()` once the socket is open (it replaces
+  sending `buildClientHello()` yourself), wire `onSendBinary` next to
+  `onSendText`, and close the socket when `onClose` fires. Handshake, AEAD and
+  framing failures are silent on the wire and surface only through `onClose`;
+  a `server/error` is also reported through `onServerError`.
+- The order after the handshake is `server/hello`, `client/hello`,
+  `server/activate`. Nothing else is sent before the first activation except
+  `client/goodbye`, and clock sync starts on that activation.
+- `client/hello` has the rc1 shape: `client_id` and `version` moved to
+  `client/init`, `player@v1_support` lost `supported_commands`, and
+  `supported_pair_methods` and `unpaired_access` were added. `DeviceInfo`
+  gains an optional `macAddress`. `artwork@v1_support` is no longer sent.
+- `server/activate` is handled: `state.activities`, `state.activeRoles` and
+  the `onActivate` callback follow it, `active_roles` persists across
+  activations that omit it, and an inadmissible activation is answered with
+  `client/goodbye` (`pairing_required` or `unauthorized`) or `pair/abort`
+  (`method_not_supported`) as the spec prescribes.
+- New required constructor argument `unpairedAccess`: whether a server with
+  no pairing record may activate roles or declare playback. It can be changed
+  at runtime; turning it off closes a session that relies on it.
+- When a role is removed its output or state goes with it: the player stream
+  ends, metadata state and its pending update are discarded, controller state
+  is cleared. Messages and binary data for inactive roles are ignored, and
+  `sendController*` throws unless the controller role is active.
+- In-band re-handshake is supported. Application messages produced between
+  the re-handshake and the `server/activate` that follows are held and sent
+  afterwards.
+- `stream/clear` and `stream/end` honour their `roles` list.
+- `SendspinGoodbyeReason` adds `unauthorized`, `pairingRequired`,
+  `concurrentAttempt` and `unpaired`.
+- Removed: `SendspinConnectionReason` and `state.connectionReason` (rc1 has
+  no `connection_reason`; use `state.activities`), and the legacy top-level
+  `audio_format` fallback in `stream/start`.
+- New: `state.serverId`, `serverId`, `isPaired`, `isRoleActive`,
+  `SendspinChannel`, `NoiseHandshake` / `NoiseSession`, and
+  `example/sendspin_cli.dart`.
+
 ### Identity: client_id is a Curve25519 public key
 
 - `SendspinProtocol` and `SendspinPlayer` take `identity:` (a

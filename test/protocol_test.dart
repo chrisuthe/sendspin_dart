@@ -8,6 +8,7 @@ import 'package:sendspin_dart/src/protocol.dart';
 import 'package:sendspin_dart/src/models.dart';
 import 'package:sendspin_dart/src/clock.dart';
 
+import 'support/connected.dart';
 import 'test_identity.dart';
 
 void main() {
@@ -18,6 +19,7 @@ void main() {
       protocol = SendspinProtocol(
         playerName: 'Test Player',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
     });
@@ -30,92 +32,11 @@ void main() {
       expect(protocol.state.connectionState, SendspinConnectionState.disabled);
     });
 
-    test('parses server/hello and transitions to syncing', () async {
-      final states = <SendspinConnectionState>[];
-      protocol.stateStream.listen((s) => states.add(s.connectionState));
-
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {
-          'server_id': 'server-1',
-          'name': 'Music Assistant',
-          'active_roles': ['player@v1'],
-        },
-      }));
-
-      await Future.delayed(Duration.zero);
-      expect(states, contains(SendspinConnectionState.syncing));
-      expect(protocol.state.serverName, 'Music Assistant');
-    });
-
-    test('server/hello with connection_reason playback', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA', 'connection_reason': 'playback'},
-      }));
-      expect(
-          protocol.state.connectionReason, SendspinConnectionReason.playback);
-    });
-
-    test('server/hello with connection_reason discovery', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA', 'connection_reason': 'discovery'},
-      }));
-      expect(
-          protocol.state.connectionReason, SendspinConnectionReason.discovery);
-    });
-
-    test('server/hello with no connection_reason defaults to unknown', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA'},
-      }));
-      expect(protocol.state.connectionReason, SendspinConnectionReason.unknown);
-    });
-
-    test('server/hello with bogus connection_reason falls back to unknown', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA', 'connection_reason': 'bogus'},
-      }));
-      expect(protocol.state.connectionReason, SendspinConnectionReason.unknown);
-    });
-
-    test('server/hello parses active_roles', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {
-          'name': 'MA',
-          'active_roles': ['player@v1'],
-        },
-      }));
-      expect(protocol.state.activeRoles, ['player@v1']);
-    });
-
-    test('server/hello with no active_roles defaults to empty list', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA'},
-      }));
-      expect(protocol.state.activeRoles, <String>[]);
-    });
-
-    test('server/hello filters non-string entries from active_roles', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {
-          'name': 'MA',
-          'active_roles': ['player@v1', 42],
-        },
-      }));
-      expect(protocol.state.activeRoles, ['player@v1']);
-    });
-
     test('builds correct client/hello message', () {
       final protocol = SendspinProtocol(
         playerName: 'Kitchen Display',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         deviceInfo: const DeviceInfo(
           productName: 'MyApp',
@@ -127,9 +48,10 @@ void main() {
       final parsed = jsonDecode(hello) as Map<String, dynamic>;
       expect(parsed['type'], 'client/hello');
       final payload = parsed['payload'] as Map<String, dynamic>;
-      expect(payload['client_id'], testIdentity.clientId);
+      expect(payload.containsKey('client_id'), isFalse,
+          reason: 'client_id travels in client/init');
+      expect(payload.containsKey('version'), isFalse);
       expect(payload['name'], 'Kitchen Display');
-      expect(payload['version'], 1);
       expect(payload['supported_roles'], contains('player@v1'));
       final deviceInfo = payload['device_info'] as Map<String, dynamic>;
       expect(deviceInfo['product_name'], 'MyApp');
@@ -138,52 +60,42 @@ void main() {
       protocol.dispose();
     });
 
-    test(
-      'client/hello player@v1_support.supported_commands is the spec-mandated '
-      "subset of {'volume', 'mute'} and excludes set_static_delay",
-      () {
-        // Per the Sendspin spec, player@v1_support.supported_commands is a
-        // subset of {'volume', 'mute'}. set_static_delay belongs in
-        // client/state's player.supported_commands. Music Assistant's
-        // Sendspin server closes the connection (WS close 1000) on hellos
-        // that advertise set_static_delay here, so this is enforced.
-        final protocol = SendspinProtocol(
-          playerName: 'Test',
-          identity: testIdentity,
-          bufferSeconds: 5,
-        );
-        final parsed =
-            jsonDecode(protocol.buildClientHello()) as Map<String, dynamic>;
-        final support =
-            parsed['payload']['player@v1_support'] as Map<String, dynamic>;
-        final cmds = (support['supported_commands'] as List).cast<String>();
-        expect(cmds, isNot(contains('set_static_delay')));
-        expect(cmds.toSet().difference({'volume', 'mute'}), isEmpty);
-        protocol.dispose();
-      },
-    );
+    test('client/hello player@v1_support holds formats and buffer_capacity',
+        () {
+      // rc1 defines no supported_commands here; settable commands are
+      // reported in client/state.
+      final parsed =
+          jsonDecode(protocol.buildClientHello()) as Map<String, dynamic>;
+      final support =
+          parsed['payload']['player@v1_support'] as Map<String, dynamic>;
+      expect(support.keys.toSet(), {'supported_formats', 'buffer_capacity'});
+    });
 
     test('emits onStreamConfig on stream/start without codec_header', () async {
       StreamConfig? receivedConfig;
       protocol.onStreamConfig = (config) => receivedConfig = config;
 
       // Need to be connected first
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA'},
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/hello',
+            'payload': {'name': 'MA'},
+          }));
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'audio_format': {
-            'codec': 'pcm',
-            'channels': 2,
-            'sample_rate': 48000,
-            'bit_depth': 16,
-          },
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
 
       expect(receivedConfig, isNotNull);
       expect(receivedConfig!.codec, 'pcm');
@@ -197,18 +109,20 @@ void main() {
       StreamConfig? receivedConfig;
       protocol.onStreamConfig = (config) => receivedConfig = config;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'audio_format': {
-            'codec': 'flac',
-            'channels': 2,
-            'sample_rate': 44100,
-            'bit_depth': 16,
-            'codec_header': 'AQIDBA==', // base64 of [1,2,3,4]
-          },
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'flac',
+                'channels': 2,
+                'sample_rate': 44100,
+                'bit_depth': 16,
+                'codec_header': 'AQIDBA==', // base64 of [1,2,3,4]
+              },
+            },
+          }));
 
       expect(receivedConfig, isNotNull);
       expect(receivedConfig!.codec, 'flac');
@@ -220,17 +134,19 @@ void main() {
       StreamConfig? receivedConfig;
       protocol.onStreamConfig = (config) => receivedConfig = config;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'player': {
-            'codec': 'pcm',
-            'channels': 2,
-            'sample_rate': 48000,
-            'bit_depth': 16,
-          },
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
 
       expect(receivedConfig, isNotNull);
       expect(receivedConfig!.codec, 'pcm');
@@ -250,7 +166,7 @@ void main() {
       data[15] = 0x03;
       data[16] = 0x04;
 
-      protocol.handleBinaryMessage(data);
+      serverSendsBinary(protocol, data);
 
       expect(receivedFrame, isNotNull);
       expect(receivedFrame!.timestampUs, 123456789);
@@ -264,7 +180,7 @@ void main() {
 
       final data = Uint8List(12);
       data[0] = 4;
-      protocol.handleBinaryMessage(data);
+      serverSendsBinary(protocol, data);
 
       expect(receivedFrame, isNull);
     });
@@ -275,7 +191,7 @@ void main() {
 
       final data = Uint8List(13);
       data[0] = 4;
-      protocol.handleBinaryMessage(data);
+      serverSendsBinary(protocol, data);
 
       expect(receivedFrame, isNotNull);
       expect(receivedFrame!.audioData, isEmpty);
@@ -285,10 +201,25 @@ void main() {
       var clearCalled = false;
       protocol.onStreamClear = () => clearCalled = true;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/clear',
-        'payload': {},
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/clear',
+            'payload': {},
+          }));
 
       expect(clearCalled, isTrue);
     });
@@ -299,27 +230,33 @@ void main() {
       protocol.onStreamEnd = () => endCalled = true;
 
       // Get into streaming state first
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/hello',
-        'payload': {'name': 'MA'},
-      }));
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/start',
-        'payload': {
-          'audio_format': {
-            'codec': 'pcm',
-            'channels': 2,
-            'sample_rate': 48000,
-            'bit_depth': 16,
-          },
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/hello',
+            'payload': {'name': 'MA'},
+          }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/start',
+            'payload': {
+              'player': {
+                'codec': 'pcm',
+                'channels': 2,
+                'sample_rate': 48000,
+                'bit_depth': 16,
+              },
+            },
+          }));
       expect(protocol.state.connectionState, SendspinConnectionState.streaming);
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'stream/end',
-        'payload': {},
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'stream/end',
+            'payload': {},
+          }));
 
       await Future.delayed(Duration.zero);
       expect(endCalled, isTrue);
@@ -334,12 +271,14 @@ void main() {
         receivedMuted = muted;
       };
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'volume', 'volume': 50},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'volume', 'volume': 50},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(protocol.state.volume, 0.5);
@@ -349,14 +288,16 @@ void main() {
 
     test('sends client/state on volume command via onSendText', () async {
       final sentMessages = <String>[];
-      protocol.onSendText = sentMessages.add;
+      captureSent(protocol, sentMessages);
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'volume', 'volume': 75},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'volume', 'volume': 75},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(sentMessages, hasLength(1));
@@ -368,7 +309,7 @@ void main() {
 
     test('updateVolume changes state and sends report', () {
       final sentMessages = <String>[];
-      protocol.onSendText = sentMessages.add;
+      captureSent(protocol, sentMessages);
 
       protocol.updateVolume(0.7);
 
@@ -420,12 +361,14 @@ void main() {
         receivedMuted = muted;
       };
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'mute', 'mute': true},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'mute', 'mute': true},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(protocol.state.muted, true);
@@ -437,12 +380,14 @@ void main() {
       int? receivedDelay;
       protocol.onStaticDelayChanged = (d) => receivedDelay = d;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'set_static_delay', 'static_delay_ms': 250},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'set_static_delay', 'static_delay_ms': 250},
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 250);
@@ -454,12 +399,17 @@ void main() {
       int? receivedDelay;
       protocol.onStaticDelayChanged = (d) => receivedDelay = d;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'set_static_delay', 'static_delay_ms': 99999},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {
+                'command': 'set_static_delay',
+                'static_delay_ms': 99999
+              },
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 5000);
@@ -470,12 +420,17 @@ void main() {
       int? receivedDelay;
       protocol.onStaticDelayChanged = (d) => receivedDelay = d;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'set_static_delay', 'static_delay_ms': -100},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {
+                'command': 'set_static_delay',
+                'static_delay_ms': -100
+              },
+            },
+          }));
 
       await Future.delayed(Duration.zero);
       expect(receivedDelay, 0);
@@ -485,20 +440,24 @@ void main() {
     test('staticDelayMs getter reflects latest value across updates', () {
       expect(protocol.staticDelayMs, 0);
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'set_static_delay', 'static_delay_ms': 100},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'set_static_delay', 'static_delay_ms': 100},
+            },
+          }));
       expect(protocol.staticDelayMs, 100);
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/command',
-        'payload': {
-          'player': {'command': 'set_static_delay', 'static_delay_ms': 500},
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/command',
+            'payload': {
+              'player': {'command': 'set_static_delay', 'static_delay_ms': 500},
+            },
+          }));
       expect(protocol.staticDelayMs, 500);
     });
 
@@ -506,6 +465,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: 1500,
       );
@@ -517,6 +477,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: 1500,
       );
@@ -532,6 +493,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: 99999,
       );
@@ -543,6 +505,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Test',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         initialStaticDelayMs: -50,
       );
@@ -557,7 +520,6 @@ void main() {
     });
 
     test('setPipelineError(true) flips buildClientState to error', () {
-      protocol.onSendText = (_) {};
       protocol.setPipelineError(true);
       final parsed =
           jsonDecode(protocol.buildClientState()) as Map<String, dynamic>;
@@ -566,7 +528,7 @@ void main() {
 
     test('setPipelineError(true) emits client/state via onSendText', () {
       final sent = <String>[];
-      protocol.onSendText = sent.add;
+      captureSent(protocol, sent);
       protocol.setPipelineError(true);
       expect(sent, hasLength(1));
       final parsed = jsonDecode(sent.first) as Map<String, dynamic>;
@@ -576,7 +538,7 @@ void main() {
 
     test('setPipelineError is idempotent when repeated', () {
       final sent = <String>[];
-      protocol.onSendText = sent.add;
+      captureSent(protocol, sent);
       protocol.setPipelineError(true);
       protocol.setPipelineError(true);
       expect(sent, hasLength(1));
@@ -584,7 +546,7 @@ void main() {
 
     test('setPipelineError(false) after error sends synchronized report', () {
       final sent = <String>[];
-      protocol.onSendText = sent.add;
+      captureSent(protocol, sent);
       protocol.setPipelineError(true);
       protocol.setPipelineError(false);
       expect(sent, hasLength(2));
@@ -621,7 +583,7 @@ void main() {
 
     test('sendGoodbye dispatches built JSON via onSendText', () {
       final sent = <String>[];
-      protocol.onSendText = sent.add;
+      captureSent(protocol, sent);
       protocol.sendGoodbye(SendspinGoodbyeReason.shutdown);
       expect(sent, hasLength(1));
       expect(
@@ -643,52 +605,45 @@ void main() {
       expect(protocol.state, isNotNull);
     });
 
-    test('startClockSync emits a single client/time on the first slot', () {
-      final sent = <String>[];
-      protocol.onSendText = sent.add;
-      protocol.startClockSync();
+    test('clock sync starts on the first activation with one client/time', () {
+      final server = connect(protocol, activate: false);
+      expect(sentOfType(protocol, 'client/time'), isEmpty,
+          reason: 'nothing may be sent before the first server/activate');
+
+      activate(server, protocol);
       // One slot opens immediately; no second send until a reply or
       // timeout advances the burst.
-      final timeMessages =
-          sent.where((m) => m.contains('"client/time"')).toList();
-      expect(timeMessages.length, 1);
-      protocol.stopClockSync();
+      expect(sentOfType(protocol, 'client/time'), hasLength(1));
     });
 
     test(
         'incoming server/time advances the burst and triggers the next '
         'client/time', () async {
-      final sent = <String>[];
-      protocol.onSendText = sent.add;
-      protocol.startClockSync();
-
-      // After start: exactly one client/time emitted (the first slot).
-      var timeCount = sent.where((m) => m.contains('"client/time"')).length;
-      expect(timeCount, 1, reason: 'first slot should fire on startClockSync');
+      final server = connect(protocol, activate: false);
+      activate(server, protocol);
+      expect(sentOfType(protocol, 'client/time'), hasLength(1));
 
       // Negative control: without a reply, no further client/time should
       // be sent (we are below the response timeout window).
       await Future<void>.delayed(const Duration(milliseconds: 5));
-      timeCount = sent.where((m) => m.contains('"client/time"')).length;
-      expect(timeCount, 1, reason: 'no spontaneous second send');
+      expect(sentOfType(protocol, 'client/time'), hasLength(1),
+          reason: 'no spontaneous second send');
 
       // Feed a realistic NTP-style reply to slot 1.
-      final nowUs = DateTime.now().microsecondsSinceEpoch;
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'server/time',
-        'payload': {
-          'client_transmitted': nowUs - 1000,
-          'server_received': nowUs - 500,
-          'server_transmitted': nowUs - 400,
-        },
-      }));
+      final nowUs = protocol.nowUs();
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'server/time',
+            'payload': {
+              'client_transmitted': nowUs - 1000,
+              'server_received': nowUs - 500,
+              'server_transmitted': nowUs - 400,
+            },
+          }));
 
-      // After the reply: exactly two client/time messages emitted total
-      // (slot 1 from start, slot 2 triggered by the reply).
-      timeCount = sent.where((m) => m.contains('"client/time"')).length;
-      expect(timeCount, 2,
+      expect(sentOfType(protocol, 'client/time'), hasLength(2),
           reason: 'reply should advance the burst to the next slot');
-      protocol.stopClockSync();
     });
 
     test('nowUs is monotonic and not derived from wall clock', () {
@@ -706,25 +661,22 @@ void main() {
     test(
         'client/time payload uses the monotonic time source, '
         'not wall clock', () {
-      final sent = <String>[];
-      protocol.onSendText = sent.add;
-      protocol.startClockSync();
-      // The first slot fires synchronously on start.
-      final clientTime = sent.firstWhere((m) => m.contains('"client/time"'));
-      final parsed = jsonDecode(clientTime) as Map<String, dynamic>;
-      final payload = parsed['payload'] as Map<String, dynamic>;
+      final server = connect(protocol, activate: false);
+      activate(server, protocol);
+      // The first slot fires synchronously on activation.
+      final payload = sentOfType(protocol, 'client/time').single['payload']
+          as Map<String, dynamic>;
       final clientTransmitted = payload['client_transmitted'] as int;
       const tenYearsUs = 10 * 365 * 24 * 60 * 60 * 1000 * 1000;
       final wall = DateTime.now().microsecondsSinceEpoch;
       expect(wall - clientTransmitted, greaterThan(tenYearsUs),
           reason: 'client_transmitted must come from the Stopwatch, '
               'not DateTime.now()');
-      protocol.stopClockSync();
     });
 
     test('stopClockSync prevents further client/time sends', () async {
       final sent = <String>[];
-      protocol.onSendText = sent.add;
+      captureSent(protocol, sent);
       protocol.startClockSync();
       protocol.stopClockSync();
       sent.clear();
@@ -755,7 +707,7 @@ void main() {
     test('handleBinaryMessage emits onAudioFrame for player type 4', () {
       AudioFrame? received;
       protocol.onAudioFrame = (f) => received = f;
-      protocol.handleBinaryMessage(buildTypedFrame(4, 1, [0x01]));
+      serverSendsBinary(protocol, buildTypedFrame(4, 1, [0x01]));
       expect(received, isNotNull);
       expect(received!.type, 4);
     });
@@ -764,7 +716,7 @@ void main() {
       AudioFrame? received;
       protocol.onAudioFrame = (f) => received = f;
       for (final id in [5, 6, 7]) {
-        protocol.handleBinaryMessage(buildTypedFrame(id, 1, [0x01]));
+        serverSendsBinary(protocol, buildTypedFrame(id, 1, [0x01]));
       }
       expect(received, isNull);
     });
@@ -772,14 +724,14 @@ void main() {
     test('handleBinaryMessage drops artwork frame type 8', () {
       AudioFrame? received;
       protocol.onAudioFrame = (f) => received = f;
-      protocol.handleBinaryMessage(buildTypedFrame(8, 1, [0x01]));
+      serverSendsBinary(protocol, buildTypedFrame(8, 1, [0x01]));
       expect(received, isNull);
     });
 
     test('handleBinaryMessage drops reserved type 0', () {
       AudioFrame? received;
       protocol.onAudioFrame = (f) => received = f;
-      protocol.handleBinaryMessage(buildTypedFrame(0, 1, [0x01]));
+      serverSendsBinary(protocol, buildTypedFrame(0, 1, [0x01]));
       expect(received, isNull);
     });
 
@@ -787,6 +739,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'p',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
@@ -801,6 +754,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'p',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         supportedFormats: const [
           AudioFormat(
@@ -819,6 +773,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'p',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 2,
         supportedFormats: const [
           AudioFormat(
@@ -838,14 +793,16 @@ void main() {
       SendspinGroupState? received;
       protocol.onGroupUpdate = (g) => received = g;
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {
-          'playback_state': 'playing',
-          'group_id': 'g1',
-          'group_name': 'Kitchen',
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {
+              'playback_state': 'playing',
+              'group_id': 'g1',
+              'group_name': 'Kitchen',
+            },
+          }));
 
       expect(protocol.state.groupState.playbackState,
           SendspinGroupPlaybackState.playing);
@@ -857,23 +814,27 @@ void main() {
     });
 
     test('group/update replaces the previous group state', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {
-          'playback_state': 'playing',
-          'group_id': 'g1',
-          'group_name': 'Kitchen',
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {
+              'playback_state': 'playing',
+              'group_id': 'g1',
+              'group_name': 'Kitchen',
+            },
+          }));
 
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {
-          'playback_state': 'stopped',
-          'group_id': 'g2',
-          'group_name': 'Solo',
-        },
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {
+              'playback_state': 'stopped',
+              'group_id': 'g2',
+              'group_name': 'Solo',
+            },
+          }));
 
       expect(protocol.state.groupState.playbackState,
           SendspinGroupPlaybackState.stopped);
@@ -882,19 +843,23 @@ void main() {
     });
 
     test('group/update with playback_state stopped', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {'playback_state': 'stopped'},
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {'playback_state': 'stopped'},
+          }));
       expect(protocol.state.groupState.playbackState,
           SendspinGroupPlaybackState.stopped);
     });
 
     test('group/update with unknown playback_state falls back to unknown', () {
-      protocol.handleTextMessage(jsonEncode({
-        'type': 'group/update',
-        'payload': {'playback_state': 'bogus'},
-      }));
+      serverSends(
+          protocol,
+          jsonEncode({
+            'type': 'group/update',
+            'payload': {'playback_state': 'bogus'},
+          }));
       expect(protocol.state.groupState.playbackState,
           SendspinGroupPlaybackState.unknown);
     });
@@ -905,6 +870,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
@@ -921,6 +887,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -935,6 +902,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Display',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.metadata},
       );
@@ -946,10 +914,12 @@ void main() {
       p.dispose();
     });
 
-    test('artwork role includes artwork@v1_support with channels', () {
+    test('artwork role sends no support object in client/hello', () {
+      // rc1 declares artwork channels in client/state, not client/hello.
       final p = SendspinProtocol(
         playerName: 'Display',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -964,14 +934,7 @@ void main() {
       final parsed = jsonDecode(p.buildClientHello()) as Map<String, dynamic>;
       final payload = parsed['payload'] as Map<String, dynamic>;
       expect(payload['supported_roles'], ['artwork@v1']);
-      final support = payload['artwork@v1_support'] as Map<String, dynamic>;
-      final channels = support['channels'] as List;
-      expect(channels, hasLength(1));
-      final ch = channels[0] as Map<String, dynamic>;
-      expect(ch['source'], 'album');
-      expect(ch['format'], 'jpeg');
-      expect(ch['media_width'], 512);
-      expect(ch['media_height'], 512);
+      expect(payload.containsKey('artwork@v1_support'), isFalse);
       p.dispose();
     });
 
@@ -979,6 +942,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Full Client',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         roles: const {
           SendspinRole.player,
@@ -1013,7 +977,7 @@ void main() {
             'artwork@v1',
           ]));
       expect(payload.containsKey('player@v1_support'), isTrue);
-      expect(payload.containsKey('artwork@v1_support'), isTrue);
+      expect(payload.containsKey('artwork@v1_support'), isFalse);
       expect(payload.containsKey('controller@v1_support'), isFalse);
       expect(payload.containsKey('metadata@v1_support'), isFalse);
       p.dispose();
@@ -1024,6 +988,7 @@ void main() {
         () => SendspinProtocol(
           playerName: 'P',
           identity: testIdentity,
+          unpairedAccess: true,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
         ),
@@ -1036,6 +1001,7 @@ void main() {
         () => SendspinProtocol(
           playerName: 'P',
           identity: testIdentity,
+          unpairedAccess: true,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
           artworkChannels: const [],
@@ -1049,6 +1015,7 @@ void main() {
         () => SendspinProtocol(
           playerName: 'P',
           identity: testIdentity,
+          unpairedAccess: true,
           bufferSeconds: 0,
           roles: const {SendspinRole.artwork},
           artworkChannels: const [
@@ -1088,15 +1055,25 @@ void main() {
     late SendspinProtocol p;
     setUp(() {
       p = SendspinProtocol(
-          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
+          playerName: 'T',
+          identity: testIdentity,
+          unpairedAccess: true,
+          bufferSeconds: 2,
+          roles: const {
+            SendspinRole.player,
+            SendspinRole.metadata,
+            SendspinRole.controller
+          });
     });
     tearDown(() => p.dispose());
 
     void sendMetadata(Map<String, dynamic> metadata) {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {'metadata': metadata},
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {'metadata': metadata},
+          }));
     }
 
     test('populates SendspinMetadata and invokes onMetadataUpdate', () {
@@ -1182,16 +1159,18 @@ void main() {
       sendMetadata({'timestamp': 0, 'title': 'Song'});
       var calls = 0;
       p.onMetadataUpdate = (_) => calls++;
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'controller': {
-            'supported_commands': ['play'],
-            'volume': 10,
-            'muted': false,
-          },
-        },
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'controller': {
+                'supported_commands': ['play'],
+                'volume': 10,
+                'muted': false,
+              },
+            },
+          }));
       expect(p.state.metadata!.title, 'Song');
       expect(calls, 0);
     });
@@ -1211,7 +1190,13 @@ void main() {
         final p = SendspinProtocol(
           playerName: 'T',
           identity: testIdentity,
+          unpairedAccess: true,
           bufferSeconds: 2,
+          roles: const {
+            SendspinRole.player,
+            SendspinRole.metadata,
+            SendspinRole.controller
+          },
           now: () => startUs + async.elapsed.inMicroseconds + skew.us,
         );
         if (synchronized) {
@@ -1225,10 +1210,12 @@ void main() {
     }
 
     void sendMetadata(SendspinProtocol p, Map<String, dynamic> metadata) {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {'metadata': metadata},
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {'metadata': metadata},
+          }));
     }
 
     const ms = Duration(milliseconds: 1);
@@ -1298,10 +1285,12 @@ void main() {
     test('omitting metadata leaves the pending update in place', () {
       withProtocol((async, p, _) {
         sendMetadata(p, {'timestamp': startUs + 5000000, 'title': 'Next'});
-        p.handleTextMessage(jsonEncode({
-          'type': 'server/state',
-          'payload': <String, dynamic>{},
-        }));
+        serverSends(
+            p,
+            jsonEncode({
+              'type': 'server/state',
+              'payload': <String, dynamic>{},
+            }));
         expect(p.pendingMetadata!.title, 'Next');
       });
     });
@@ -1334,24 +1323,21 @@ void main() {
       withProtocol((async, p, _) {
         // Answer every client/time with a server clock [offsetUs] ahead.
         var offsetUs = 0;
-        p.onSendText = (text) {
-          final msg = jsonDecode(text) as Map<String, dynamic>;
+        final server = connect(p, activate: false);
+        server.onJson = (msg) {
           if (msg['type'] != 'client/time') return;
           final t = (msg['payload'] as Map)['client_transmitted'] as int;
-          final reply = jsonEncode({
-            'type': 'server/time',
-            'payload': {
-              'client_transmitted': t,
-              'server_received': t + offsetUs,
-              'server_transmitted': t + offsetUs,
-            },
-          });
           // The burst driver is not re-entrant; answer after it returns.
-          scheduleMicrotask(() => p.handleTextMessage(reply));
+          scheduleMicrotask(() => server.sendJson('server/time', {
+                'client_transmitted': t,
+                'server_received': t + offsetUs,
+                'server_transmitted': t + offsetUs,
+              }));
         };
 
-        // First burst: the filter believes server == local.
-        p.startClockSync();
+        // First burst, started by the activation: the filter believes
+        // server == local.
+        activate(server, p);
         async.flushMicrotasks();
         expect(p.clock.sampleCount, 1);
 
@@ -1469,7 +1455,15 @@ void main() {
     late SendspinProtocol p;
     setUp(() {
       p = SendspinProtocol(
-          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
+          playerName: 'T',
+          identity: testIdentity,
+          unpairedAccess: true,
+          bufferSeconds: 2,
+          roles: const {
+            SendspinRole.player,
+            SendspinRole.metadata,
+            SendspinRole.controller
+          });
     });
     tearDown(() => p.dispose());
 
@@ -1478,16 +1472,18 @@ void main() {
         () {
       SendspinControllerInfo? received;
       p.onControllerUpdate = (c) => received = c;
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'controller': {
-            'supported_commands': ['play', 'pause', 'next'],
-            'volume': 55,
-            'muted': true,
-          },
-        },
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'controller': {
+                'supported_commands': ['play', 'pause', 'next'],
+                'volume': 55,
+                'muted': true,
+              },
+            },
+          }));
       expect(received, isNotNull);
       expect(received!.supportedCommands, ['play', 'pause', 'next']);
       expect(received!.volume, 55);
@@ -1498,28 +1494,32 @@ void main() {
     test(
         'server/state controller filters non-string entries from supported_commands',
         () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'controller': {
-            'supported_commands': ['play', 42, null, 'pause'],
-          },
-        },
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'controller': {
+                'supported_commands': ['play', 42, null, 'pause'],
+              },
+            },
+          }));
       expect(p.state.controller!.supportedCommands, ['play', 'pause']);
     });
 
     test(
         'server/state controller with missing volume defaults to 0 and muted defaults to false',
         () {
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'controller': {
-            'supported_commands': ['play'],
-          },
-        },
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'controller': {
+                'supported_commands': ['play'],
+              },
+            },
+          }));
       expect(p.state.controller!.volume, 0);
       expect(p.state.controller!.muted, false);
     });
@@ -1529,7 +1529,15 @@ void main() {
     late SendspinProtocol p;
     setUp(() {
       p = SendspinProtocol(
-          playerName: 'T', identity: testIdentity, bufferSeconds: 2);
+          playerName: 'T',
+          identity: testIdentity,
+          unpairedAccess: true,
+          bufferSeconds: 2,
+          roles: const {
+            SendspinRole.player,
+            SendspinRole.metadata,
+            SendspinRole.controller
+          });
     });
     tearDown(() => p.dispose());
 
@@ -1538,10 +1546,12 @@ void main() {
       var ctrlFired = 0;
       p.onMetadataUpdate = (_) => metaFired++;
       p.onControllerUpdate = (_) => ctrlFired++;
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': <String, dynamic>{},
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': <String, dynamic>{},
+          }));
       expect(metaFired, 0);
       expect(ctrlFired, 0);
       expect(p.state.metadata, isNull);
@@ -1555,13 +1565,15 @@ void main() {
       var ctrlFired = 0;
       p.onMetadataUpdate = (_) => metaFired++;
       p.onControllerUpdate = (_) => ctrlFired++;
-      p.handleTextMessage(jsonEncode({
-        'type': 'server/state',
-        'payload': {
-          'metadata': {'timestamp': 0, 'title': 'T'},
-          'controller': {'volume': 10},
-        },
-      }));
+      serverSends(
+          p,
+          jsonEncode({
+            'type': 'server/state',
+            'payload': {
+              'metadata': {'timestamp': 0, 'title': 'T'},
+              'controller': {'volume': 10},
+            },
+          }));
       expect(metaFired, 1);
       expect(ctrlFired, 1);
       expect(p.state.metadata!.title, 'T');
@@ -1584,11 +1596,12 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerCommand('play');
 
@@ -1607,11 +1620,12 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerVolume(75);
 
@@ -1628,11 +1642,12 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       p.sendControllerMute(true);
 
@@ -1649,6 +1664,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         roles: const {SendspinRole.player},
       );
@@ -1660,6 +1676,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       expect(() => p.sendControllerVolume(50), throwsStateError);
@@ -1670,6 +1687,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       expect(() => p.sendControllerMute(true), throwsStateError);
@@ -1680,11 +1698,12 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
       final sent = <String>[];
-      p.onSendText = sent.add;
+      captureSent(p, sent);
 
       const commands = [
         'play',
@@ -1717,10 +1736,11 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
-      p.onSendText = (_) {};
+      connect(p);
       expect(() => p.sendControllerVolume(-1), throwsRangeError);
       expect(() => p.sendControllerVolume(101), throwsRangeError);
       // Boundary values should work
@@ -1735,6 +1755,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'Remote',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
@@ -1749,6 +1770,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
       );
       final parsed = jsonDecode(p.buildClientState()) as Map<String, dynamic>;
@@ -1773,6 +1795,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -1786,7 +1809,7 @@ void main() {
       ArtworkFrame? received;
       p.onArtworkFrame = (f) => received = f;
 
-      p.handleBinaryMessage(buildTypedFrame(8, 555000, [0xFF, 0xD8, 0xFF]));
+      serverSendsBinary(p, buildTypedFrame(8, 555000, [0xFF, 0xD8, 0xFF]));
 
       expect(received, isNotNull);
       expect(received!.channel, 0);
@@ -1799,6 +1822,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.artwork},
         artworkChannels: const [
@@ -1827,7 +1851,7 @@ void main() {
       ArtworkFrame? received;
       p.onArtworkFrame = (f) => received = f;
 
-      p.handleBinaryMessage(buildTypedFrame(11, 999, [0x01]));
+      serverSendsBinary(p, buildTypedFrame(11, 999, [0x01]));
 
       expect(received, isNotNull);
       expect(received!.channel, 3);
@@ -1838,13 +1862,14 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         roles: const {SendspinRole.player},
       );
       ArtworkFrame? received;
       p.onArtworkFrame = (f) => received = f;
 
-      p.handleBinaryMessage(buildTypedFrame(8, 1, [0x01]));
+      serverSendsBinary(p, buildTypedFrame(8, 1, [0x01]));
 
       expect(received, isNull);
       p.dispose();
@@ -1854,6 +1879,7 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 5,
         roles: const {SendspinRole.player, SendspinRole.artwork},
         artworkChannels: const [
@@ -1870,9 +1896,9 @@ void main() {
       p.onArtworkFrame = (f) => artworkReceived = f;
 
       // Audio chunks carry the 13-byte rc1 header (4 extra send_ahead bytes).
-      p.handleBinaryMessage(
-          buildTypedFrame(4, 100, [0x00, 0x00, 0x00, 0x00, 0x01, 0x02]));
-      p.handleBinaryMessage(buildTypedFrame(8, 200, [0xFF, 0xD8]));
+      serverSendsBinary(
+          p, buildTypedFrame(4, 100, [0x00, 0x00, 0x00, 0x00, 0x01, 0x02]));
+      serverSendsBinary(p, buildTypedFrame(8, 200, [0xFF, 0xD8]));
 
       expect(audioReceived, isNotNull);
       expect(audioReceived!.type, 4);
@@ -1885,13 +1911,14 @@ void main() {
       final p = SendspinProtocol(
         playerName: 'P',
         identity: testIdentity,
+        unpairedAccess: true,
         bufferSeconds: 0,
         roles: const {SendspinRole.controller},
       );
       AudioFrame? received;
       p.onAudioFrame = (f) => received = f;
 
-      p.handleBinaryMessage(buildTypedFrame(4, 1, [0x01]));
+      serverSendsBinary(p, buildTypedFrame(4, 1, [0x01]));
 
       expect(received, isNull);
       p.dispose();

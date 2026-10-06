@@ -2,6 +2,7 @@ library sendspin_dart;
 
 export 'src/protocol.dart';
 export 'src/player.dart';
+export 'src/activation.dart';
 export 'src/arrival_delay.dart';
 export 'src/buffer.dart';
 export 'src/channel.dart';

@@ -7,6 +7,7 @@ import 'buffer.dart';
 import 'codec.dart';
 import 'identity.dart';
 import 'models.dart';
+import 'psk.dart';
 
 /// High-level audio player that composes [SendspinProtocol] with a codec and
 /// jitter buffer to provide the full audio pipeline.
@@ -47,6 +48,8 @@ class SendspinPlayer {
     ],
     Set<SendspinRole> additionalRoles = const {},
     List<ArtworkChannel>? artworkChannels,
+    required bool unpairedAccess,
+    List<SendspinPskCandidate> Function()? pskCandidates,
     this.codecFactory,
     int initialStaticDelayMs = 0,
   })  : bufferSeconds = bufferSeconds,
@@ -58,6 +61,8 @@ class SendspinPlayer {
           supportedFormats: supportedFormats,
           roles: {SendspinRole.player, ...additionalRoles},
           artworkChannels: artworkChannels,
+          unpairedAccess: unpairedAccess,
+          pskCandidates: pskCandidates,
           initialStaticDelayMs: initialStaticDelayMs,
         ) {
     _wireProtocol();
@@ -74,6 +79,30 @@ class SendspinPlayer {
 
   void Function(String message)? get onSendText => protocol.onSendText;
   set onSendText(void Function(String message)? cb) => protocol.onSendText = cb;
+
+  void Function(Uint8List data)? get onSendBinary => protocol.onSendBinary;
+  set onSendBinary(void Function(Uint8List data)? cb) =>
+      protocol.onSendBinary = cb;
+
+  void Function(String reason)? get onClose => protocol.onClose;
+  set onClose(void Function(String reason)? cb) => protocol.onClose = cb;
+
+  void Function(String reason)? get onServerError => protocol.onServerError;
+  set onServerError(void Function(String reason)? cb) =>
+      protocol.onServerError = cb;
+
+  void Function(Set<String> activities, List<String> activeRoles)?
+      get onActivate => protocol.onActivate;
+  set onActivate(
+          void Function(Set<String> activities, List<String> activeRoles)?
+              cb) =>
+      protocol.onActivate = cb;
+
+  bool get unpairedAccess => protocol.unpairedAccess;
+  set unpairedAccess(bool enabled) => protocol.unpairedAccess = enabled;
+
+  String? get serverId => protocol.serverId;
+  bool get isPaired => protocol.isPaired;
 
   void Function(double volume, bool muted)? get onVolumeChanged =>
       protocol.onVolumeChanged;
@@ -131,6 +160,9 @@ class SendspinPlayer {
   void sendControllerVolume(int volume) =>
       protocol.sendControllerVolume(volume);
   void sendControllerMute(bool mute) => protocol.sendControllerMute(mute);
+
+  /// Begins the connection by sending `client/init`.
+  void start() => protocol.start();
 
   void handleTextMessage(String text) => protocol.handleTextMessage(text);
   void handleBinaryMessage(Uint8List data) =>

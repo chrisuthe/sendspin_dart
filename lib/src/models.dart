@@ -12,24 +12,6 @@ enum SendspinRole {
   const SendspinRole(this.wireValue);
 }
 
-/// Reason a Sendspin server initiated (or accepted) a connection.
-/// Used to prioritize between multiple servers during discovery.
-enum SendspinConnectionReason {
-  discovery('discovery'),
-  playback('playback'),
-  unknown('unknown');
-
-  final String wireValue;
-  const SendspinConnectionReason(this.wireValue);
-
-  static SendspinConnectionReason fromWire(String? value) {
-    for (final r in SendspinConnectionReason.values) {
-      if (r.wireValue == value) return r;
-    }
-    return SendspinConnectionReason.unknown;
-  }
-}
-
 /// Group playback state reported via group/update.
 enum SendspinGroupPlaybackState {
   playing('playing'),
@@ -205,7 +187,16 @@ class SendspinPlayerState {
   final int clockOffsetMs;
   final int clockSamples;
   final int staticDelayMs;
-  final SendspinConnectionReason connectionReason;
+
+  /// The connected server's `server_id` (its static public key), once the
+  /// handshake has completed.
+  final String? serverId;
+
+  /// The purposes the server currently declares on this connection
+  /// (`playback`, `pairing`), from the latest `server/activate`.
+  final Set<String> activities;
+
+  /// Versioned roles the server has activated, e.g. `player@v1`.
   final List<String> activeRoles;
   final SendspinGroupState groupState;
   final SendspinMetadata? metadata;
@@ -223,7 +214,8 @@ class SendspinPlayerState {
     this.clockOffsetMs = 0,
     this.clockSamples = 0,
     this.staticDelayMs = 0,
-    this.connectionReason = SendspinConnectionReason.unknown,
+    this.serverId,
+    this.activities = const <String>{},
     this.activeRoles = const <String>[],
     this.groupState = const SendspinGroupState(),
     this.metadata,
@@ -247,12 +239,14 @@ class SendspinPlayerState {
     int? clockOffsetMs,
     int? clockSamples,
     int? staticDelayMs,
-    SendspinConnectionReason? connectionReason,
+    String? serverId,
+    Set<String>? activities,
     List<String>? activeRoles,
     SendspinGroupState? groupState,
     SendspinMetadata? metadata,
     bool clearMetadata = false,
     SendspinControllerInfo? controller,
+    bool clearController = false,
   }) {
     return SendspinPlayerState(
       connectionState: connectionState ?? this.connectionState,
@@ -266,11 +260,12 @@ class SendspinPlayerState {
       clockOffsetMs: clockOffsetMs ?? this.clockOffsetMs,
       clockSamples: clockSamples ?? this.clockSamples,
       staticDelayMs: staticDelayMs ?? this.staticDelayMs,
-      connectionReason: connectionReason ?? this.connectionReason,
+      serverId: serverId ?? this.serverId,
+      activities: activities ?? this.activities,
       activeRoles: activeRoles ?? this.activeRoles,
       groupState: groupState ?? this.groupState,
       metadata: clearMetadata ? null : metadata ?? this.metadata,
-      controller: controller ?? this.controller,
+      controller: clearController ? null : controller ?? this.controller,
     );
   }
 }
