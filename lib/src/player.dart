@@ -276,6 +276,10 @@ class SendspinPlayer {
     return samples;
   }
 
+  /// Tells the player that the output path's latency has really changed,
+  /// so the next `outputTimeUs` is taken as it is instead of being smoothed.
+  void resetOutputClock() => _buffer?.resetOutputClock();
+
   /// The last measured playback error in microseconds: positive when audio
   /// was running late against its schedule, negative when early.
   int get syncErrorUs => _buffer?.syncErrorUs ?? 0;
@@ -372,8 +376,8 @@ class SendspinPlayer {
       ..outputDelayMs = protocol.outputDelayMs
       ..setOutputFormat(
           sampleRate: config.sampleRate, channels: config.channels)
-      ..onFormatChange = (sampleRate, channels) {
-        onStreamStart?.call(sampleRate, channels, _config?.bitDepth ?? 16);
+      ..onFormatChange = (sampleRate, channels, bitDepth) {
+        onStreamStart?.call(sampleRate, channels, bitDepth);
       };
 
     onStreamStart?.call(config.sampleRate, config.channels, config.bitDepth);
@@ -391,6 +395,7 @@ class SendspinPlayer {
       samples,
       sampleRate: config.sampleRate,
       channels: config.channels,
+      bitDepth: config.bitDepth,
     );
     protocol.updatePipelineState(
         protocol.state.copyWith(bufferDepthMs: _buffer!.bufferDepthMs));

@@ -207,6 +207,8 @@ Future<void> main(List<String> args) async {
       onTimeout: () => 'time limit reached');
   pump.cancel();
   collectStats();
+  // Let queued PCM drain before exiting, to a pipe as well as a file.
+  await pcmOut?.flush();
   if (pcmOut != null && pcmOut != stdout) await pcmOut.close();
 
   final state = player.state;
