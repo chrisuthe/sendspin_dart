@@ -784,7 +784,13 @@ class SendspinProtocol {
   ///
   /// Throws [StateError] if the controller role is not active or the server
   /// does not currently list the command as supported.
-  void sendControllerCommand(String command) => _sendControllerCommand(command);
+  void sendControllerCommand(String command) {
+    if (const {'volume', 'mute', 'seek', 'seek_relative'}.contains(command)) {
+      throw ArgumentError.value(command, 'command',
+          'takes a parameter; use the dedicated sendController method');
+    }
+    _sendControllerCommand(command);
+  }
 
   /// Sends a controller volume command (0-100) for the whole group.
   ///
@@ -1439,8 +1445,9 @@ class SendspinProtocol {
     if (json == null) return null;
     final rawCommands = jsonList(json['supported_commands']);
     return SendspinControllerInfo(
-      supportedCommands:
-          rawCommands?.whereType<String>().toList() ?? const <String>[],
+      // Unmodifiable: this list is what command sending is checked against.
+      supportedCommands: List.unmodifiable(
+          rawCommands?.whereType<String>() ?? const <String>[]),
       volume: jsonInt(json['volume']) ?? 0,
       muted: jsonBool(json['muted']) ?? false,
       repeat: SendspinRepeatMode.fromWire(jsonString(json['repeat'])),
