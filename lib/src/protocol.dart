@@ -218,8 +218,8 @@ class SendspinProtocol {
   /// handshake; sent as `pairing_index`.
   int _pairingIndex = 0;
 
-  /// The long-term PSK offered in the pairing attempt in progress, from
-  /// `client/pair-init` until success or abort.
+  /// The pairing attempt in progress, from `client/pair-init` until success
+  /// or abort.
   _PairingAttempt? _attempt;
   Timer? _pairingAttemptTimer;
 
@@ -293,8 +293,9 @@ class SendspinProtocol {
 
   /// Called when the device must emit a dynamic pairing code: show it, or
   /// speak it. Called again for each round of the same attempt, with the
-  /// same code. While it is shown, the device suspends any other use of
-  /// that output (the stream stays open and resumes in sync afterwards).
+  /// same code. The spec has the device suspend any other use of that
+  /// output while the code is emitted; that is the consumer's to do (the
+  /// stream stays open, so playback resumes in sync afterwards).
   void Function(SendspinPairingCode code)? onPairingCode;
 
   /// Called when a pairing code that was being emitted is no longer needed:
@@ -986,7 +987,7 @@ class SendspinProtocol {
 
   void _stopTimers() {
     _endPairingAttempt();
-    pairing.connectionDropped(this);
+    pairing.closePairingWindowFor(this);
     _releasePairingRecord();
     _activateTimer?.cancel();
     _activateTimer = null;
@@ -1150,8 +1151,8 @@ class SendspinProtocol {
     _reportStateIfChanged();
 
     // Each pairing activation admits one attempt. The admissibility check
-    // above has already established that the method is `pairing_psk` and
-    // that the pairing PSK is what the handshake matched.
+    // above has already established that the method is one this client
+    // offers and that the handshake matched the PSK the method requires.
     if (activities.contains(activityPairing)) {
       _beginPairing(
           jsonString(pairing!['method'])!, jsonString(pairing['format']));
@@ -1286,7 +1287,7 @@ class SendspinProtocol {
   /// open, and pairing messages the server sent before it saw the abort are
   /// discarded until its next `server/activate`.
   void _abortPairing(String reason) {
-    if (_attempt == null) return;
+    if (_attempt == null && _pendingPairing == null) return;
     _endPairingAttempt();
     _pairingAborted = true;
     _sendApplication(jsonEncode({
@@ -1295,8 +1296,9 @@ class SendspinProtocol {
     }));
   }
 
-  /// Aborts the pairing attempt in progress on the operator's behalf with
-  /// `pair/abort` reason `user_cancelled`. Does nothing if none is running.
+  /// Aborts the pairing attempt in progress, or held back, on the operator's
+  /// behalf with `pair/abort` reason `user_cancelled`. Does nothing if there
+  /// is none.
   void cancelPairing() => _abortPairing('user_cancelled');
 
   /// Refuses this connection under the multiple-server admission rules, for
@@ -1321,8 +1323,9 @@ class SendspinProtocol {
   void _handlePairingMessage(String type, Map<String, dynamic> payload) {
     final attempt = _attempt;
     if (type == 'pair/abort') {
-      // Has no effect once the attempt is already over.
-      if (attempt == null) return;
+      // Aborts an attempt, started or held back; has no effect once it is
+      // already over.
+      if (attempt == null && _pendingPairing == null) return;
       // A missing or malformed field in a pairing message is a protocol
       // error: close without an application-level message.
       final reason = jsonString(payload['reason']);
@@ -1342,7 +1345,11 @@ class SendspinProtocol {
 
     switch ((type, attempt.step)) {
       case ('server/pair-init', _PairingStep.awaitServerInit):
-        // The first round carries the server's nonce; later rounds reuse it.
+        // The first round carries the server's nonce; later rounds reuse it
+        // and must not carry one.
+        if (attempt.code != null && payload.containsKey('nonce_A')) {
+          return _pairingProtocolError('nonce_A after the first round');
+        }
         if (attempt.code == null) {
           final nonceA = _decodeField(payload['nonce_A'], 32);
           if (nonceA == null) {
@@ -1365,6 +1372,10 @@ class SendspinProtocol {
           );
         }
         attempt.step = _PairingStep.awaitAuth;
+        // The round counts from here, whichever way it ends.
+        pairing
+            .beginRound()
+            .catchError((Object e) => onPairingStoreError?.call(e));
         onPairingCode?.call(attempt.code!);
 
       case ('server/pair-auth', _PairingStep.awaitAuth):
@@ -1406,7 +1417,9 @@ class SendspinProtocol {
         // The server has persisted its record; persist ours.
         final method = attempt.method;
         _endPairingAttempt();
-        if (method == 'static_pairing_code') pairing.closePairingWindow();
+        if (method == 'static_pairing_code') {
+          pairing.closePairingWindowFor(this);
+        }
         pairing
             .addRecord(SendspinPairingRecord(
                 serverId: handshake.serverId, longTermPsk: attempt.psk))
@@ -1425,7 +1438,8 @@ class SendspinProtocol {
     final isDynamic = attempt.method == 'dynamic_pairing_code';
     if (!verified) {
       if (isDynamic) {
-        if (pairing.recordRound(verified: false)) {
+        // At the round limit the client aborts instead of retrying.
+        if (pairing.isHoldingBack) {
           return _abortPairing('pairing_code_mismatch');
         }
         // Another round against the same code.
@@ -1438,13 +1452,17 @@ class SendspinProtocol {
           'payload': <String, dynamic>{},
         }));
       } else {
-        pairing.recordWindowFailure();
+        pairing.recordWindowFailure(this);
         _abortPairing('pairing_code_mismatch');
       }
       return;
     }
 
-    if (isDynamic) pairing.recordRound(verified: true);
+    if (isDynamic) {
+      pairing
+          .roundVerified()
+          .catchError((Object e) => onPairingStoreError?.call(e));
+    }
     final cpace = attempt.cpace!;
     final sid = attempt.sid!;
     attempt.step = _PairingStep.awaitFinalize;
@@ -1861,7 +1879,7 @@ class SendspinProtocol {
     _helloReceived = false;
     _activated = false;
     _endPairingAttempt();
-    pairing.connectionDropped(this);
+    pairing.closePairingWindowFor(this);
     _releasePairingRecord();
     _pairingAborted = false;
     _pairingIndex = 0;

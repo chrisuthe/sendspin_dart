@@ -106,7 +106,7 @@ The player schedules every frame against the local clock: it translates the audi
 - **Pairing with a code.** Pass `codePairing:` to offer one code method as well:
   - `SendspinDynamicCodePairing(formats: {'digits', 'qr_code'})` for a device with a screen or speaker. `onPairingCode` hands you a fresh code for each pairing: six digits to show as `code.display` (`123-456`), or an `SP:1...` token to render as a QR code. The user enters it into the server. `onPairingCodeEnded` tells you to take it down.
   - `SendspinStaticCodePairing(code: '12345678')` for a device with no way to show anything. The 8-digit code must be random per device. Attempts are only accepted while a pairing window is open: call `pairing.openPairingWindow()` when the user presses a physical button.
-  - After 20 wrong entries in a row the dynamic method holds further attempts back until `pairing.releaseHoldBack()`, which should be wired to a deliberate action on the device.
+  - After 20 rounds without a correct entry (a wrong code, or a server that started a round and gave up) the dynamic method holds further attempts back until `pairing.releaseHoldBack()`, which should be wired to a deliberate action on the device. The count is saved with the pairing records, so a restart does not reset it.
 
 Store the identity key and the pairing data as secrets.
 

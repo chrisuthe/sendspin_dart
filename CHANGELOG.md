@@ -159,9 +159,11 @@ protocol. It cannot talk to pre-rc1 servers.
   - `SendspinDynamicCodePairing`: a per-session code derived from the
     handshake, emitted through `onPairingCode` as six digits or as an
     `SP:1...` QR token, withdrawn through `onPairingCodeEnded`. A wrong
-    entry asks for another round; after 20 in a row the client aborts and
-    reports further attempts as pending until
-    `SendspinPairing.releaseHoldBack()`.
+    entry asks for another round. After 20 rounds without a verified one,
+    counting rounds the server abandoned, the client aborts and reports
+    further attempts as pending until `SendspinPairing.releaseHoldBack()`.
+    The count is persisted as `SendspinPairingData.pairingRounds`
+    (`pairing_rounds` in its JSON, optional on read).
   - `SendspinStaticCodePairing`: a fixed 8-digit code, accepted only while
     a pairing window is open (`SendspinPairing.openPairingWindow()`, 5
     minutes by default; closed by a completed pairing, the fifth failed
