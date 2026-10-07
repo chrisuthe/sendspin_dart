@@ -1,4 +1,4 @@
-## Unreleased (Sendspin 1.0.0-rc1)
+## 0.1.0 (Sendspin 1.0.0-rc1)
 
 Breaking: this release moves the library to the Sendspin 1.0.0-rc1 wire
 protocol. It cannot talk to pre-rc1 servers.
