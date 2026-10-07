@@ -104,6 +104,17 @@ String encodePairingToken({
   return 'SP:0${_base32([...clientKey, ...pairingPsk]).replaceAll('2', '9')}';
 }
 
+/// Encodes a version-1 pairing token: the 24-byte dynamic pairing code in
+/// the `qr_code` emission format, which the device renders as a QR code for
+/// the operator to scan into the server.
+String encodePairingCodeToken(Uint8List code) {
+  if (code.length != 24) {
+    throw ArgumentError.value(
+        code.length, 'code.length', 'A QR pairing code is 24 bytes');
+  }
+  return 'SP:1${_base32(code).replaceAll('2', '9')}';
+}
+
 /// RFC 4648 base32 without padding.
 String _base32(List<int> bytes) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
