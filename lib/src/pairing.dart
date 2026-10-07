@@ -1,5 +1,6 @@
 // ABOUTME: Pairing credentials: the device's pairing PSK, the pairing
 // ABOUTME: records it holds for servers, their storage, and pairing tokens.
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -104,6 +105,122 @@ String encodePairingToken({
   return 'SP:0${_base32([...clientKey, ...pairingPsk]).replaceAll('2', '9')}';
 }
 
+/// A pairing-code method the client offers in addition to the Pairing PSK
+/// method. At most one may be offered.
+sealed class SendspinCodePairing {
+  const SendspinCodePairing();
+
+  /// The method identifier used in `supported_pair_methods` and
+  /// `server/activate`.
+  String get method;
+
+  /// The emission formats offered for this method.
+  Set<String> get formats;
+
+  /// The method's descriptor in `client/hello`.
+  Map<String, dynamic> get descriptor;
+}
+
+/// Dynamic Pairing Code: the device shows (or speaks) a fresh code for each
+/// pairing and the operator enters it into the server. For devices with a
+/// display or a speaker.
+class SendspinDynamicCodePairing extends SendspinCodePairing {
+  /// How the code reaches the operator: `display`, `speaker`.
+  final Set<String> outChannels;
+
+  /// `digits` (six digits to type) and/or `qr_code` (a token to scan, which
+  /// needs a display able to render a QR code).
+  @override
+  final Set<String> formats;
+
+  SendspinDynamicCodePairing({
+    this.outChannels = const {'display'},
+    this.formats = const {'digits'},
+  }) {
+    if (outChannels.isEmpty ||
+        !outChannels.every(const {'display', 'speaker'}.contains)) {
+      throw ArgumentError.value(outChannels, 'outChannels',
+          "must be a non-empty subset of 'display', 'speaker'");
+    }
+    if (formats.isEmpty ||
+        !formats.every(const {'digits', 'qr_code'}.contains)) {
+      throw ArgumentError.value(formats, 'formats',
+          "must be a non-empty subset of 'digits', 'qr_code'");
+    }
+  }
+
+  @override
+  String get method => 'dynamic_pairing_code';
+
+  @override
+  Map<String, dynamic> get descriptor => {
+        'out_channels': [
+          for (final c in const ['display', 'speaker'])
+            if (outChannels.contains(c)) c
+        ],
+        'formats': [
+          for (final f in const ['digits', 'qr_code'])
+            if (formats.contains(f)) f
+        ],
+      };
+}
+
+/// Static Pairing Code: a fixed 8-digit code, for devices with no way to
+/// emit one. Every attempt needs a pairing window opened by a physical
+/// gesture on the device ([SendspinPairing.openPairingWindow]).
+///
+/// The code must be random per device, never a shared default: anyone who
+/// knows it can pair with the device while a window is open.
+class SendspinStaticCodePairing extends SendspinCodePairing {
+  /// The 8 decimal digits.
+  final String code;
+
+  /// Where the operator finds the code: `device`, `leaflet`, `operator`.
+  final List<String>? locations;
+
+  SendspinStaticCodePairing({required this.code, this.locations}) {
+    if (!RegExp(r'^\d{8}$').hasMatch(code)) {
+      throw ArgumentError.value(
+          code.length, 'code.length', 'A static pairing code is 8 digits');
+    }
+  }
+
+  @override
+  String get method => 'static_pairing_code';
+
+  @override
+  Set<String> get formats => const {};
+
+  @override
+  Map<String, dynamic> get descriptor =>
+      {if (locations != null) 'locations': locations};
+}
+
+/// A dynamic pairing code for the device to emit.
+class SendspinPairingCode {
+  /// `digits` or `qr_code`.
+  final String format;
+
+  /// What the operator enters: six digits, or the `SP:1...` token to render
+  /// as a QR code.
+  final String code;
+
+  /// The code as it should be shown: digits grouped `123-456`; the token
+  /// unchanged.
+  final String display;
+
+  /// The bytes fed to the key exchange: the ASCII digits, or the 24-byte
+  /// code the token carries.
+  final Uint8List rawCode;
+
+  SendspinPairingCode({
+    required this.format,
+    required this.code,
+    required this.display,
+    required this.rawCode,
+  });
+}
+
 /// Encodes a version-1 pairing token: the 24-byte dynamic pairing code in
 /// the `qr_code` emission format, which the device renders as a QR code for
 /// the operator to scan into the server.
@@ -154,6 +271,24 @@ class SendspinPairing {
   /// Least recently used first.
   final List<SendspinPairingRecord> _records;
   final Map<String, int> _retained = {};
+
+  /// Notified when a held-back attempt may be able to proceed.
+  final List<void Function()> _listeners = [];
+
+  int _failedRounds = 0;
+  bool _holdingBack = false;
+
+  bool _windowOpen = false;
+  int _windowFailures = 0;
+  Object? _windowOwner;
+  Timer? _windowTimer;
+
+  /// Dynamic-code rounds allowed since the last one whose `server_kc`
+  /// verified. On reaching it the client aborts and holds attempts back.
+  static const int roundLimit = 20;
+
+  /// Failed attempts that close a static pairing window.
+  static const int windowFailureLimit = 5;
 
   SendspinPairing._(
       this._store, this._pairingPsk, this._records, this.capacity) {
@@ -263,6 +398,93 @@ class SendspinPairing {
     } else {
       _retained.remove(serverId);
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Code-based pairing: rate limiting shared by every connection
+  // ---------------------------------------------------------------------
+
+  void addListener(void Function() listener) => _listeners.add(listener);
+  void removeListener(void Function() listener) => _listeners.remove(listener);
+
+  void _notify() {
+    for (final listener in List.of(_listeners)) {
+      listener();
+    }
+  }
+
+  /// Dynamic-code rounds that have failed since one last verified. Not
+  /// partitioned by server.
+  int get failedRounds => _failedRounds;
+
+  /// True once the round limit has been reached: dynamic-code attempts are
+  /// answered with `client/pair-pending` until [releaseHoldBack].
+  bool get isHoldingBack => _holdingBack;
+
+  /// Records the outcome of a dynamic-code round. Returns true when a
+  /// failure reached the round limit, so the attempt must be aborted.
+  bool recordRound({required bool verified}) {
+    if (verified) {
+      _failedRounds = 0;
+      return false;
+    }
+    _failedRounds++;
+    if (_failedRounds < roundLimit) return false;
+    _holdingBack = true;
+    return true;
+  }
+
+  /// Lets dynamic-code attempts proceed again and resets the round count.
+  /// Call this only for a deliberate operator action on the device.
+  void releaseHoldBack() {
+    _holdingBack = false;
+    _failedRounds = 0;
+    _notify();
+  }
+
+  /// Whether a static-code pairing window is open.
+  bool get isPairingWindowOpen => _windowOpen;
+
+  /// Opens a pairing window: static-code attempts are accepted until one
+  /// succeeds, five fail, the connection using it drops, or [lifetime]
+  /// passes. Call this for a deliberate physical gesture on the device (a
+  /// button press), not for anything that can be triggered remotely.
+  void openPairingWindow({Duration lifetime = const Duration(minutes: 5)}) {
+    _windowTimer?.cancel();
+    _windowOpen = true;
+    _windowFailures = 0;
+    _windowOwner = null;
+    _windowTimer = Timer(lifetime, closePairingWindow);
+    _notify();
+  }
+
+  /// Closes the pairing window. An attempt already in progress runs on.
+  void closePairingWindow() {
+    _windowTimer?.cancel();
+    _windowTimer = null;
+    _windowOpen = false;
+    _windowOwner = null;
+  }
+
+  /// Whether [connection] may start a static-code attempt now: a window is
+  /// open, and it is not already tied to another connection. A window admits
+  /// attempts only on the connection that carried its first.
+  bool claimPairingWindow(Object connection) {
+    if (!_windowOpen) return false;
+    _windowOwner ??= connection;
+    return identical(_windowOwner, connection);
+  }
+
+  /// Records a failed static-code attempt; the fifth closes the window.
+  void recordWindowFailure() {
+    if (!_windowOpen) return;
+    _windowFailures++;
+    if (_windowFailures >= windowFailureLimit) closePairingWindow();
+  }
+
+  /// Closes the window if [connection] is the one using it.
+  void connectionDropped(Object connection) {
+    if (identical(_windowOwner, connection)) closePairingWindow();
   }
 
   Future<void> _save() async {
