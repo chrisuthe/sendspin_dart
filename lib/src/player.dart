@@ -173,6 +173,10 @@ class SendspinPlayer {
   set onArtworkFrame(void Function(ArtworkFrame frame)? cb) =>
       protocol.onArtworkFrame = cb;
 
+  Uint8List? currentArtwork(int channel) => protocol.currentArtwork(channel);
+  void setArtworkChannels(List<ArtworkChannel> channels) =>
+      protocol.setArtworkChannels(channels);
+
   SendspinMetadata? get pendingMetadata => protocol.pendingMetadata;
   int? get currentTrackPositionMs => protocol.currentTrackPositionMs;
 
