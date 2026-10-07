@@ -89,6 +89,25 @@ protocol. It cannot talk to pre-rc1 servers.
   source. Removed from `SendspinBuffer`: `startupBufferMs`, `isInUnderrun`,
   and the fixed `sampleRate` / `channels` constructor arguments.
 
+### Artwork role
+
+- Artwork uses the rc1 transfer: an announce (`timestamp`, `total_size`),
+  then parts, with an optional cancel, on binary IDs 8-11. Images are
+  reassembled by the new `ArtworkReceiver`.
+- **`onArtworkFrame` changed meaning:** it now fires when a channel's image
+  *changes*, with the complete image, once the transfer has finished and its
+  timestamp has been reached. An empty `imageData` means the channel was
+  cleared (a zero-size image, `stream/end`, or the role being removed).
+  Previously it fired once per binary message with whatever that message
+  held.
+- Each channel keeps a current image and at most one pending image; a new
+  announce or a cancel discards the pending one. Late artwork is still
+  shown. `currentArtwork(channel)` returns what a channel shows.
+- Malformed artwork messages and sequences close the connection, as the
+  role requires. Artwork outside an active artwork stream is ignored.
+- `setArtworkChannels(...)` changes the channel configuration at runtime
+  and reports it in `client/state`.
+
 ### Controller role
 
 - `SendspinControllerInfo` gains `repeat`, `shuffle` and `seekMaxMs`, which

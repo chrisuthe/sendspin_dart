@@ -333,10 +333,15 @@ class ArtworkChannel {
 
 /// A parsed binary artwork frame from the Sendspin protocol.
 ///
-/// Artwork frames use binary message types 8-11, mapping to channels 0-3.
+/// Artwork uses binary message types 8-11, mapping to channels 0-3.
 class ArtworkFrame {
   final int channel;
+
+  /// Server-clock time the image was scheduled for; 0 for a channel cleared
+  /// by the end of the artwork stream.
   final int timestampUs;
+
+  /// The complete encoded image, or empty when the channel was cleared.
   final Uint8List imageData;
 
   const ArtworkFrame({

@@ -379,39 +379,5 @@ void main() {
       expect(controller['mute'], false);
       p.dispose();
     });
-
-    test('onArtworkFrame callback fires via player delegation', () {
-      final p = SendspinPlayer(
-        playerName: 'Full',
-        identity: testIdentity,
-        unpairedAccess: true,
-        bufferSeconds: 5,
-        additionalRoles: const {SendspinRole.artwork},
-        artworkChannels: const [
-          ArtworkChannel(
-            source: 'album',
-            format: 'jpeg',
-            mediaWidth: 100,
-            mediaHeight: 100,
-          ),
-        ],
-      );
-
-      ArtworkFrame? received;
-      p.onArtworkFrame = (f) => received = f;
-
-      final frame = Uint8List(12);
-      frame[0] = 8; // artwork type
-      ByteData.view(frame.buffer).setInt64(1, 777, Endian.big);
-      frame[9] = 0xFF;
-      frame[10] = 0xD8;
-      frame[11] = 0xFF;
-      serverSendsBinary(p, frame);
-
-      expect(received, isNotNull);
-      expect(received!.channel, 0);
-      expect(received!.timestampUs, 777);
-      p.dispose();
-    });
   });
 }

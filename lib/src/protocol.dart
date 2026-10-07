@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'activation.dart';
 import 'arrival_delay.dart';
+import 'artwork.dart';
 import 'channel.dart';
 import 'identity.dart';
 import 'encoding.dart';
@@ -159,7 +160,7 @@ class SendspinProtocol {
   final DeviceInfo deviceInfo;
   final List<AudioFormat> supportedFormats;
   final Set<SendspinRole> roles;
-  final List<ArtworkChannel>? artworkChannels;
+  List<ArtworkChannel>? _artworkChannels;
 
   final SendspinClock _clock = SendspinClock();
 
@@ -198,6 +199,14 @@ class SendspinProtocol {
 
   /// Drops a connection whose server never declares its purpose.
   Timer? _activateTimer;
+
+  late final ArtworkReceiver _artwork = ArtworkReceiver(
+    // With no samples the filter cannot place a timestamp: show it now.
+    usUntil: (timestampUs) => _clock.sampleCount == 0
+        ? 0
+        : _clock.computeClientTime(timestampUs) - nowUs(),
+  )..onImage = (frame) => onArtworkFrame?.call(frame);
+  bool _artworkStreamActive = false;
 
   /// Pairing `server/activate` messages received since the last Noise
   /// handshake; sent as `pairing_index`.
@@ -298,7 +307,9 @@ class SendspinProtocol {
   /// chunks with a saturated `send_ahead` or before the clock is synchronized.
   void Function(int delayUs)? onArrivalDelay;
 
-  /// Called when a binary artwork frame is received (artwork role).
+  /// Called when an artwork channel's image changes: an image has been
+  /// received in full and its display time has been reached, or the channel
+  /// was cleared, in which case `imageData` is empty.
   void Function(ArtworkFrame frame)? onArtworkFrame;
 
   /// Called when the server changes volume or mute via server/command.
@@ -330,7 +341,7 @@ class SendspinProtocol {
       AudioFormat(codec: 'pcm', channels: 2, sampleRate: 44100, bitDepth: 16),
     ],
     this.roles = const {SendspinRole.player},
-    this.artworkChannels,
+    List<ArtworkChannel>? artworkChannels,
     required bool unpairedAccess,
     SendspinPairing? pairing,
     this.activateTimeout = const Duration(seconds: 30),
@@ -346,6 +357,7 @@ class SendspinProtocol {
     int Function()? now,
   })  : _now = now,
         _unpairedAccess = unpairedAccess,
+        _artworkChannels = artworkChannels,
         pairing = pairing ?? SendspinPairing.inMemory(),
         _supportedCommands = Set.of(supportedCommands),
         _requiredLeadTimeMs = requiredLeadTimeMs,
@@ -354,7 +366,7 @@ class SendspinProtocol {
       throw ArgumentError('Timing parameters must not be negative');
     }
     if (roles.contains(SendspinRole.artwork) &&
-        (artworkChannels == null || artworkChannels!.isEmpty)) {
+        (artworkChannels == null || artworkChannels.isEmpty)) {
       throw ArgumentError(
           'artworkChannels is required when artwork role is present');
     }
@@ -415,6 +427,7 @@ class SendspinProtocol {
       // The mapping just moved, so a held scheduled update may now be due
       // (or due later than its timer says).
       _evaluatePendingMetadata();
+      _artwork.reevaluate();
       // A player becomes available once the filter is synchronized.
       _reportStateIfChanged();
     };
@@ -501,6 +514,25 @@ class SendspinProtocol {
     _preferredFormat = format;
     _sendState();
   }
+
+  /// The artwork channel configuration reported in `client/state`.
+  List<ArtworkChannel>? get artworkChannels => _artworkChannels;
+
+  /// Changes the artwork channels at runtime (index is the channel number,
+  /// at most four; a channel with source `none` receives nothing) and
+  /// reports the new configuration. The server answers with a
+  /// `stream/start` and re-sends the images for channels that changed.
+  void setArtworkChannels(List<ArtworkChannel> channels) {
+    _requireSupported(SendspinRole.artwork);
+    if (channels.isEmpty || channels.length > 4) {
+      throw ArgumentError('artworkChannels must have 1 to 4 entries');
+    }
+    _artworkChannels = List.of(channels);
+    _sendState();
+  }
+
+  /// The image an artwork channel currently shows, or null if none.
+  Uint8List? currentArtwork(int channel) => _artwork.currentImage(channel);
 
   /// The scheduled metadata update that has not taken effect yet, if any.
   /// The current state is [SendspinPlayerState.metadata].
@@ -610,7 +642,7 @@ class SendspinProtocol {
 
     if (isRoleActive(SendspinRole.artwork)) {
       payload['artwork'] = {
-        'channels': artworkChannels!.map((c) => c.toJson()).toList(),
+        'channels': _artworkChannels!.map((c) => c.toJson()).toList(),
       };
     }
 
@@ -744,6 +776,13 @@ class SendspinProtocol {
   /// Whether the server has activated [role] on this connection.
   bool isRoleActive(SendspinRole role) =>
       _state.activeRoles.contains(role.wireValue);
+
+  void _requireSupported(SendspinRole role) {
+    if (!roles.contains(role)) {
+      throw StateError(
+          '${role.wireValue} is not one of the roles of this client');
+    }
+  }
 
   void _requireRole(SendspinRole role) {
     if (!isRoleActive(role)) {
@@ -1241,7 +1280,15 @@ class SendspinProtocol {
       if (_state.controller != null) {
         _updateState(_state.copyWith(clearController: true));
       }
+    } else if (role == SendspinRole.artwork.wireValue) {
+      _endArtworkStream();
     }
+  }
+
+  /// Ends the artwork stream: the channels no longer display artwork.
+  void _endArtworkStream() {
+    _artworkStreamActive = false;
+    _artwork.streamEnded();
   }
 
   void _handleGroupUpdate(Map<String, dynamic> payload) {
@@ -1281,6 +1328,13 @@ class SendspinProtocol {
   }
 
   void _handleStreamStart(Map<String, dynamic> payload) {
+    final artwork = jsonObject(payload['artwork']);
+    final artworkChannels = jsonList(artwork?['channels']);
+    if (artworkChannels != null && isRoleActive(SendspinRole.artwork)) {
+      _artwork.streamStarted(artworkChannels);
+      _artworkStreamActive = true;
+    }
+
     final audioFormat = jsonObject(payload['player']);
     if (audioFormat == null || !isRoleActive(SendspinRole.player)) return;
     final codecName = jsonString(audioFormat['codec']) ?? 'pcm';
@@ -1323,6 +1377,10 @@ class SendspinProtocol {
   }
 
   void _handleStreamEnd(Map<String, dynamic> payload) {
+    final roles = payload['roles'];
+    if (_artworkStreamActive && (roles is! List || roles.contains('artwork'))) {
+      _endArtworkStream();
+    }
     if (!_playerStreamActive || !_targetsPlayer(payload)) return;
     _endPlayerStream();
   }
@@ -1464,9 +1522,8 @@ class SendspinProtocol {
   ///
   /// Audio chunks (ID 4) are forwarded to [onAudioFrame] only when the
   /// [SendspinRole.player] role is active. The remaining player IDs (5-7) are
-  /// not defined and are ignored. Artwork frames (ID 8-11) are forwarded to
-  /// [onArtworkFrame] only when [SendspinRole.artwork] is active. All other
-  /// IDs are silently dropped.
+  /// not defined and are ignored. Artwork messages (ID 8-11) go to the
+  /// artwork receiver. All other IDs are silently dropped.
   void _dispatchBinary(Uint8List data) {
     if (data.isEmpty || !_activated || _rehandshaking) return;
     final type = data[0];
@@ -1482,15 +1539,15 @@ class SendspinProtocol {
     }
 
     if (type >= _binaryTypeArtworkMin && type <= _binaryTypeArtworkMax) {
-      if (data.length < 9) return;
-      if (isRoleActive(SendspinRole.artwork)) {
-        final view =
-            ByteData.view(data.buffer, data.offsetInBytes, data.lengthInBytes);
-        onArtworkFrame?.call(ArtworkFrame(
-          channel: type - _binaryTypeArtworkMin,
-          timestampUs: view.getInt64(1, Endian.big),
-          imageData: Uint8List.sublistView(data, 9),
-        ));
+      // A client that does not implement the artwork role ignores its IDs.
+      if (!roles.contains(SendspinRole.artwork)) return;
+      try {
+        _artwork.handleMessage(data,
+            streamActive:
+                _artworkStreamActive && isRoleActive(SendspinRole.artwork));
+      } on ArtworkError catch (e) {
+        // Malformed artwork messages and sequences are protocol errors.
+        _channel.close('artwork: ${e.message}');
       }
       return;
     }
@@ -1570,6 +1627,8 @@ class SendspinProtocol {
     _rehandshaking = false;
     _clockSyncPaused = false;
     _playerStreamActive = false;
+    _artworkStreamActive = false;
+    _artwork.reset();
     _held.clear();
     _reportedAvailable = null;
     _stateHeld = false;
@@ -1592,6 +1651,7 @@ class SendspinProtocol {
   void dispose() {
     _channel.reset();
     _stopTimers();
+    _artwork.reset();
     _discardMetadata();
     _stateController.close();
   }
