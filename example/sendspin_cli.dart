@@ -5,7 +5,8 @@
 // Usage: dart run example/sendspin_cli.dart ws://host:8927/sendspin
 //          [--seconds N] [--key-file PATH] [--pairing-file PATH]
 //          [--token-file PATH] [--no-unpaired] [--name NAME]
-//          [--pcm-out PATH|-] [--latency-ms N]
+//          [--pcm-out PATH|-] [--latency-ms N] [--artwork]
+//          [--send-command NAME]
 //
 // With `--pcm-out -` the decoded audio goes to stdout as 16-bit little-endian
 // PCM and the log goes to stderr, e.g.
@@ -61,7 +62,8 @@ Future<void> main(List<String> args) async {
     stderr.writeln('usage: sendspin_cli.dart ws://host:port/sendspin '
         '[--seconds N] [--key-file PATH] [--pairing-file PATH] '
         '[--token-file PATH] [--no-unpaired] [--name NAME] '
-        '[--pcm-out PATH|-] [--latency-ms N]');
+        '[--pcm-out PATH|-] [--latency-ms N] [--artwork] '
+        '[--send-command NAME]');
     exit(64);
   }
   final url = args.first;
@@ -88,7 +90,20 @@ Future<void> main(List<String> args) async {
     bufferSeconds: 5,
     unpairedAccess: !args.contains('--no-unpaired'),
     pairing: pairing,
-    additionalRoles: const {SendspinRole.metadata, SendspinRole.controller},
+    additionalRoles: {
+      SendspinRole.metadata,
+      SendspinRole.controller,
+      if (args.contains('--artwork')) SendspinRole.artwork,
+    },
+    artworkChannels: args.contains('--artwork')
+        ? const [
+            ArtworkChannel(
+                source: 'album',
+                format: 'jpeg',
+                mediaWidth: 256,
+                mediaHeight: 256),
+          ]
+        : null,
   );
 
   final ws = await WebSocket.connect(url);
@@ -111,6 +126,24 @@ Future<void> main(List<String> args) async {
   player.onGroupUpdate =
       (g) => _log('group ${g.groupName} ${g.playbackState?.wireValue}');
   player.onVolumeChanged = (v, m) => _log('volume $v muted=$m');
+  player.onArtworkFrame = (frame) => _log(frame.imageData.isEmpty
+      ? 'artwork channel ${frame.channel} cleared'
+      : 'artwork channel ${frame.channel} ${frame.imageData.length} bytes '
+          'jpeg=${frame.imageData[0] == 0xFF && frame.imageData[1] == 0xD8}');
+  final commandToSend = _option(args, '--send-command');
+  var commandSent = false;
+  player.onControllerUpdate = (c) {
+    _log('controller commands=${c.supportedCommands} volume=${c.volume} '
+        'repeat=${c.repeat.wireValue} shuffle=${c.shuffle} '
+        'seek_max_ms=${c.seekMaxMs}');
+    if (commandToSend != null &&
+        !commandSent &&
+        player.canSendControllerCommand(commandToSend)) {
+      commandSent = true;
+      player.sendControllerCommand(commandToSend);
+      _log('sent controller command $commandToSend');
+    }
+  };
 
   ws.listen(
     (message) {
