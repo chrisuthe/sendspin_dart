@@ -116,7 +116,7 @@ The library is transport-agnostic and works for both ways rc1 connections are ma
 
 Either way, call `resetForNewConnection()` before reusing a player for another socket.
 
-With server-initiated connections several servers may connect. rc1 defines which one a client keeps ([multiple servers](https://github.com/Sendspin/spec/blob/1.0.0-rc1/connection.md#multiple-servers-server-initiated)). That decision spans connections, so it is the consumer's: run one `SendspinPlayer` per connection, compare `state.activities` after `onActivate`, and dismiss the loser with `sendGoodbye(SendspinGoodbyeReason.anotherServer)` or `rejectConcurrentPairing()`. `state.serverId` identifies the server, for persisting the last one that played.
+With server-initiated connections several servers may connect. rc1 defines which one a client keeps ([multiple servers](https://github.com/Sendspin/spec/blob/1.0.0-rc1/connection.md#multiple-servers-server-initiated)). That decision spans connections, so it is the consumer's: run one `SendspinPlayer` per connection, compare `state.activities` after `onActivate`, and dismiss the loser with `sendGoodbye(SendspinGoodbyeReason.anotherServer)` followed by closing its socket yourself (`sendGoodbye` only sends the message), or with `rejectConcurrentPairing()`, which asks for the close through `onClose`. `state.serverId` identifies the server, for persisting the last one that played.
 
 ## Custom codecs
 
