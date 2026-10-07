@@ -85,8 +85,8 @@ protocol. It cannot talk to pre-rc1 servers.
   throwing out of the message handler.
 - `pullSamples` returns silence until the time filter is synchronized.
 - New on `SendspinPlayer`: `nowUs()`, `syncErrorUs`, `framesDropped`,
-  `framesInserted`, `resyncCount`, `lateChunksDropped`, and a `now` clock
-  source. Removed from `SendspinBuffer`: `startupBufferMs`, `isInUnderrun`,
+  `framesInserted`, `resyncCount`, `lateChunksDropped`, `resetOutputClock()`
+  (for a real change in output latency), and a `now` clock source. Removed from `SendspinBuffer`: `startupBufferMs`, `isInUnderrun`,
   and the fixed `sampleRate` / `channels` constructor arguments.
 
 ### Artwork role
@@ -107,6 +107,9 @@ protocol. It cannot talk to pre-rc1 servers.
   role requires. Artwork outside an active artwork stream is ignored.
 - `setArtworkChannels(...)` changes the channel configuration at runtime
   and reports it in `client/state`.
+- While the client is unavailable, images are followed to the end of their
+  transfer but not kept or shown. The same applies to an image larger than
+  `ArtworkReceiver.maxImageBytes` (32 MiB).
 
 ### Controller role
 
@@ -119,6 +122,8 @@ protocol. It cannot talk to pre-rc1 servers.
   controller state: `sendController*` now throws `StateError` otherwise,
   including before any controller state has arrived. Use
   `canSendControllerCommand(name)` to drive UI enablement.
+- `sendControllerCommand` no longer accepts `volume`, `mute`, `seek` or
+  `seek_relative`; use the methods that take their parameter.
 
 ### Pairing
 
@@ -200,6 +205,12 @@ protocol. It cannot talk to pre-rc1 servers.
   settings keyed on the old `client_id` do not carry over.
 - New dependency: `package:cryptography` (pure Dart). The minimum Dart SDK
   moves from 3.0 to 3.3.
+
+### Clock sync
+
+- A clock-sync round trip that measures as 0 µs no longer reaches the time
+  filter as a zero-variance sample, which made it divide by zero and throw
+  out of the message handler.
 
 ### Player audio chunks
 
