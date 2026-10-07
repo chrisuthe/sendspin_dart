@@ -13,6 +13,7 @@ export 'src/codec.dart';
 export 'src/identity.dart';
 export 'src/models.dart';
 export 'src/pairing.dart';
+export 'src/pairing_code.dart' show DynamicPairingCode, groupPairingDigits;
 export 'src/psk.dart';
 export 'src/audio_sink.dart';
 export 'src/client.dart';

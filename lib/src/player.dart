@@ -63,6 +63,7 @@ class SendspinPlayer {
     List<ArtworkChannel>? artworkChannels,
     required bool unpairedAccess,
     SendspinPairing? pairing,
+    SendspinCodePairing? codePairing,
     this.codecFactory,
     Set<SendspinPlayerCommand> supportedCommands = const {
       SendspinPlayerCommand.volume,
@@ -84,6 +85,7 @@ class SendspinPlayer {
           artworkChannels: artworkChannels,
           unpairedAccess: unpairedAccess,
           pairing: pairing,
+          codePairing: codePairing,
           supportedCommands: supportedCommands,
           initialOutputDelayMs: initialOutputDelayMs,
           requiredLeadTimeMs: requiredLeadTimeMs,
@@ -138,6 +140,15 @@ class SendspinPlayer {
       protocol.onPairingAborted;
   set onPairingAborted(void Function(String reason)? cb) =>
       protocol.onPairingAborted = cb;
+
+  void Function(SendspinPairingCode code)? get onPairingCode =>
+      protocol.onPairingCode;
+  set onPairingCode(void Function(SendspinPairingCode code)? cb) =>
+      protocol.onPairingCode = cb;
+
+  void Function()? get onPairingCodeEnded => protocol.onPairingCodeEnded;
+  set onPairingCodeEnded(void Function()? cb) =>
+      protocol.onPairingCodeEnded = cb;
 
   void Function(Object error)? get onPairingStoreError =>
       protocol.onPairingStoreError;
