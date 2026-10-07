@@ -296,6 +296,24 @@ void main() {
       expect(rig.pull(2020000, count: 441).first, 6000);
     });
 
+    test('each format change reports the bit depth of the audio reached', () {
+      // Three formats are queued before anything is pulled.
+      final rig = _Rig()..streamStart();
+      rig.chunk(2000000, 100);
+      rig.streamStart(sampleRate: 44100, bitDepth: 24);
+      final pcm24 = Uint8List(441 * 2 * 3);
+      final message = Uint8List(13 + pcm24.length)..[0] = 4;
+      ByteData.view(message.buffer)
+          .setInt64(1, 2010000 + _offsetUs, Endian.big);
+      rig.server.sendMessage(message);
+      rig.streamStart(sampleRate: 96000, bitDepth: 32);
+
+      rig.pull(2000000);
+      rig.pull(2010000);
+      expect(rig.starts.last, (44100, 2, 24),
+          reason: 'not the 32-bit format that arrived last');
+    });
+
     test('a new chunk is decoded with the codec in effect when it arrived', () {
       final codecs = <_SpyCodec>[];
       final rig = _Rig(codecFactory: (codec, depth, channels, rate) {

@@ -214,6 +214,44 @@ void main() {
       expect(left[336], 700);
     });
 
+    test('a sub-millisecond gap between chunks is kept as silence', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, 240));
+      // 5 ms of audio, a 500 µs hole (24 frames), then more audio.
+      _add(b, 1005500, _ramp(700, 240));
+      final left = _left(b.pullSamples(600 * 2, 1000000));
+      expect(left.sublist(0, 240), List.generate(240, (i) => 100 + i));
+      expect(left.sublist(240, 264), everyElement(0));
+      expect(left.sublist(264, 504), List.generate(240, (i) => 700 + i));
+      expect(b.framesDropped + b.framesInserted, 0);
+    });
+
+    test('a small overlap between chunks is trimmed from the later one', () {
+      final b = _buffer();
+      _add(b, 1000000, _ramp(100, 240));
+      // Starts 250 µs (12 frames) before the first chunk ends.
+      _add(b, 1004750, _ramp(700, 240));
+      final left = _left(b.pullSamples(_pullFrames * 2, 1000000));
+      expect(left[239], 339);
+      expect(left[240], 712);
+    });
+
+    test('a chunk boundary does not undo a soft correction in progress', () {
+      // Running 500 µs late and correcting one frame per pull: reaching the
+      // next (contiguous) chunk must not jump the remaining error away.
+      final s = _Skewed();
+      final b = s.buffer;
+      for (var c = 0; c < 40; c++) {
+        _add(b, 1000000 + c * 5000, _ramp(1 + c * 240, 240));
+      }
+      b.pullSamples(_pullFrames * 2, 1000000);
+      s.skewUs = -500;
+      final left = _left(b.pullSamples(_pullFrames * 2, 1010000));
+      expect(b.framesDropped, 1);
+      expect(left.first, 1 + 480 + 1);
+      expect(left.last, left.first + 479, reason: 'contiguous across chunks');
+    });
+
     test('an error beyond 1 ms is corrected in one step, not gradually', () {
       final s = _Skewed();
       final b = s.buffer;
@@ -462,6 +500,17 @@ void main() {
       expect(worstUs, lessThan(250));
     });
 
+    test('resetOutputClock makes the next reported time authoritative', () {
+      // The backend latency really changed by 2 ms: too small to be told
+      // from jitter, so the consumer says so.
+      final b = _buffer();
+      _addStream(b, 1000000);
+      b.pullSamples(_pullFrames * 2, 1000000);
+      b.resetOutputClock();
+      final left = _left(b.pullSamples(_pullFrames * 2, 1012000));
+      expect(left.first, 1 + 480 + 96 + 1);
+    });
+
     test('a jump in the reported time is taken as a real discontinuity', () {
       final b = _buffer();
       _addStream(b, 1000000);
@@ -521,7 +570,7 @@ void main() {
     test('chunks keep the format they were added with', () {
       final b = _buffer();
       final changes = <(int, int)>[];
-      b.onFormatChange = (rate, channels) => changes.add((rate, channels));
+      b.onFormatChange = (rate, channels, _) => changes.add((rate, channels));
 
       _add(b, 1000000, _ramp(100, _pullFrames));
       // The next chunk continues the timeline at 44.1 kHz mono.
@@ -557,7 +606,7 @@ void main() {
     test('the first chunk sets the format without a change notification', () {
       final b = _buffer();
       var changes = 0;
-      b.onFormatChange = (_, __) => changes++;
+      b.onFormatChange = (_, __, ___) => changes++;
       _add(b, 1000000, _ramp(100, 441, channels: 1),
           sampleRate: 44100, channels: 1);
       expect(b.pullSamples(441, 1000000).first, 100);
@@ -585,6 +634,12 @@ void main() {
       expect(b.bufferDepthMs, 500);
       b.pullSamples(_pullFrames * 2, 1000000);
       expect(b.bufferDepthMs, 490);
+    });
+
+    test('a single chunk longer than maxBufferMs is not kept', () {
+      final b = SendspinBuffer(serverToLocalUs: (t) => t, maxBufferMs: 100);
+      _add(b, 1000000, _ramp(1, 48000 * 150 ~/ 1000));
+      expect(b.bufferDepthMs, 0);
     });
 
     test('the oldest audio is trimmed beyond maxBufferMs', () {

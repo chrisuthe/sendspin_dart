@@ -10,11 +10,13 @@ class _AudioChunk implements Comparable<_AudioChunk> {
   final Int16List samples;
   final int sampleRate;
   final int channels;
+  final int bitDepth;
 
   /// Frames already consumed from the front.
   int offset = 0;
 
-  _AudioChunk(this.timestampUs, this.samples, this.sampleRate, this.channels);
+  _AudioChunk(this.timestampUs, this.samples, this.sampleRate, this.channels,
+      this.bitDepth);
 
   int get frames => samples.length ~/ channels;
   int get remaining => frames - offset;
@@ -127,10 +129,11 @@ class SendspinBuffer {
   int _resyncCount = 0;
   int _lateChunksDropped = 0;
 
-  /// Called when playback reaches audio in a different format from the one
-  /// being output. The pull in which this fires returns silence; later pulls
-  /// must be sized for the new format.
-  void Function(int sampleRate, int channels)? onFormatChange;
+  /// Called when playback reaches audio with a different sample rate or
+  /// channel count from the one being output, with the wire bit depth that
+  /// audio was added with. The pull in which this fires returns silence;
+  /// later pulls must be sized for the new format.
+  void Function(int sampleRate, int channels, int bitDepth)? onFormatChange;
 
   SendspinBuffer({required this.serverToLocalUs, required this.maxBufferMs});
 
@@ -183,10 +186,11 @@ class SendspinBuffer {
     Int16List samples, {
     required int sampleRate,
     required int channels,
+    int bitDepth = 16,
   }) {
     if (samples.length < channels) return;
-    final chunk = _AudioChunk(
-        timestampUs, Int16List.fromList(samples), sampleRate, channels);
+    final chunk = _AudioChunk(timestampUs, Int16List.fromList(samples),
+        sampleRate, channels, bitDepth);
 
     final outputEnd = _outputEndUs;
     if (outputEnd != null &&
@@ -198,7 +202,7 @@ class SendspinBuffer {
     if (!_chunks.add(chunk)) return;
     _bufferedUs += chunk.durationUs;
 
-    while (_bufferedUs > maxBufferMs * 1000 && _chunks.length > 1) {
+    while (_bufferedUs > maxBufferMs * 1000 && _chunks.isNotEmpty) {
       _remove(_chunks.first);
     }
   }
@@ -241,6 +245,16 @@ class SendspinBuffer {
     return start.round();
   }
 
+  /// Forgets the smoothed output clock, so the next reported output time is
+  /// taken as it is. Call this when the output path's latency really changes
+  /// by a small amount (a device reconfiguration, a different sink): a step
+  /// under 5 ms is otherwise indistinguishable from jitter and would only be
+  /// followed over a few seconds.
+  void resetOutputClock() {
+    _nextPullUs = null;
+    _outputClockDrift = 0;
+  }
+
   /// Returns [count] interleaved samples whose first sample will be output
   /// at local time [reportedOutputTimeUs] (now plus whatever delay lies
   /// between this call and the audio port). Anything not covered by due
@@ -264,7 +278,7 @@ class SendspinBuffer {
         final pullUs = (count ~/ oldChannels) * 1000000 / oldRate;
         _outputEndUs =
             _smoothOutputTime(reportedOutputTimeUs, pullUs) + pullUs.round();
-        onFormatChange?.call(head.sampleRate, head.channels);
+        onFormatChange?.call(head.sampleRate, head.channels, head.bitDepth);
         return out;
       }
     }
@@ -282,6 +296,9 @@ class SendspinBuffer {
     var aligned = _synced;
     var firstChunk = true;
     var resyncing = false;
+    // Server time at which the chunk just played ran out, to measure the gap
+    // to the next one independently of any drift error being worked off.
+    int? previousEndUs;
 
     while (written < frames && _chunks.isNotEmpty) {
       final chunk = _chunks.first;
@@ -319,6 +336,16 @@ class SendspinBuffer {
       } else if (firstChunk && errorUs.abs() > deadbandUs) {
         written += _softCorrect(
             chunk, errorUs, outputTimeUs, rate, channels, out, frames);
+      } else if (previousEndUs != null) {
+        // Chunks normally abut. A small hole between them is kept as silence
+        // and a small overlap trimmed, so the timeline stays exact.
+        final gap = framesOf(chunk.headUs - previousEndUs);
+        if (gap > 0) {
+          written += gap < frames - written ? gap : frames - written;
+        } else if (gap < 0 && -gap < chunk.remaining) {
+          _consume(chunk, -gap);
+        }
+        if (written >= frames) break;
       }
       firstChunk = false;
       if (resyncing) {
@@ -334,6 +361,8 @@ class SendspinBuffer {
           chunk.offset * channels);
       written += n;
       _consume(chunk, n);
+      previousEndUs =
+          chunk.remaining <= 0 ? chunk.timestampUs + chunk.durationUs : null;
     }
 
     // Running dry breaks continuity: whatever comes next is lined up afresh.
