@@ -154,7 +154,21 @@ protocol. It cannot talk to pre-rc1 servers.
   application-level message.
 - New callbacks `onPaired`, `onPairingAborted`, `onPairingStoreError`.
 - The `pskCandidates` constructor hook is replaced by `pairing`.
-- Not implemented: the optional dynamic and static pairing-code methods.
+- Code-based pairing, optional in rc1, is implemented for both methods.
+  Pass `codePairing:` to offer one of them alongside Pairing PSK:
+  - `SendspinDynamicCodePairing`: a per-session code derived from the
+    handshake, emitted through `onPairingCode` as six digits or as an
+    `SP:1...` QR token, withdrawn through `onPairingCodeEnded`. A wrong
+    entry asks for another round; after 20 in a row the client aborts and
+    reports further attempts as pending until
+    `SendspinPairing.releaseHoldBack()`.
+  - `SendspinStaticCodePairing`: a fixed 8-digit code, accepted only while
+    a pairing window is open (`SendspinPairing.openPairingWindow()`, 5
+    minutes by default; closed by a completed pairing, the fifth failed
+    attempt, or the connection dropping).
+  - Both run CPACE-X25519-SHA512 (`lib/src/cpace.dart`) and deliver the new
+    long-term PSK sealed under its output, only after the server has proved
+    it knew the code.
 
 ### client/state and player commands
 

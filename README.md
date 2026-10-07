@@ -103,7 +103,10 @@ The player schedules every frame against the local clock: it translates the audi
 - **Identity.** The `client_id` is the device's Curve25519 public key. `SendspinIdentity.loadOrCreate(store)` generates one on first run and reuses it afterwards. Losing the private key means servers see a new device.
 - **Unpaired access.** `unpairedAccess: true` lets a server the device has never paired with play to it, once that server's operator approves the device. It is convenient and unauthenticated. With `false`, the device must be paired first. It can be changed at runtime.
 - **Pairing.** The device has a pairing PSK. `player.pairingToken` returns it together with the public key as an `SP:0...` string; show that to the user as text or a QR code, and they enter it into the server. The server then pairs, both sides store a record, and later sessions with that server are authenticated. `onPaired` tells you when it happened.
-- The code-based pairing methods (a 6-digit code on the device's display) are not implemented yet.
+- **Pairing with a code.** Pass `codePairing:` to offer one code method as well:
+  - `SendspinDynamicCodePairing(formats: {'digits', 'qr_code'})` for a device with a screen or speaker. `onPairingCode` hands you a fresh code for each pairing: six digits to show as `code.display` (`123-456`), or an `SP:1...` token to render as a QR code. The user enters it into the server. `onPairingCodeEnded` tells you to take it down.
+  - `SendspinStaticCodePairing(code: '12345678')` for a device with no way to show anything. The 8-digit code must be random per device. Attempts are only accepted while a pairing window is open: call `pairing.openPairingWindow()` when the user presses a physical button.
+  - After 20 wrong entries in a row the dynamic method holds further attempts back until `pairing.releaseHoldBack()`, which should be wired to a deliberate action on the device.
 
 Store the identity key and the pairing data as secrets.
 
