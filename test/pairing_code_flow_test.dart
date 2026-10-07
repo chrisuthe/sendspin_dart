@@ -109,6 +109,16 @@ class _Fixture {
 SendspinCodePairing _dynamic({Set<String> formats = const {'digits'}}) =>
     SendspinDynamicCodePairing(formats: formats);
 
+class _MemoryStore implements SendspinPairingStore {
+  SendspinPairingData? stored;
+
+  @override
+  Future<SendspinPairingData?> load() async => stored;
+
+  @override
+  Future<void> save(SendspinPairingData data) async => stored = data;
+}
+
 void main() {
   group('client/hello descriptors', () {
     Map<String, dynamic> methods(SendspinCodePairing? codePairing) {
@@ -347,11 +357,11 @@ void main() {
         f.sendAuth(utf8.encode('000000'), round: round);
         f.sendConfirm();
       }
-      expect(f.pairing.failedRounds, 5);
+      expect(f.pairing.roundsSinceVerified, 5);
       f.server.sendJson('server/pair-init');
       f.sendAuth(utf8.encode(f.shown.first.code), round: 6);
       f.sendConfirm();
-      expect(f.pairing.failedRounds, 0);
+      expect(f.pairing.roundsSinceVerified, 0);
     });
   });
 
@@ -428,8 +438,8 @@ void main() {
         f.activatePairing('static_pairing_code');
         f.sendAuth(utf8.encode('00000000'), pairingIndex: attempt);
         f.sendConfirm();
+        expect(f.pairing.isPairingWindowOpen, attempt < 5);
       }
-      expect(f.pairing.isPairingWindowOpen, isFalse);
       f.server.receivedJson.clear();
       f.activatePairing('static_pairing_code');
       expect(f.sent.single['type'], 'client/pair-pending');
@@ -596,6 +606,219 @@ void main() {
       final f = _Fixture(_dynamic());
       f.activatePairing('static_pairing_code');
       expect(f.sent.single['payload'], {'reason': 'method_not_supported'});
+    });
+  });
+
+  group('round limit accounting', () {
+    void startRound(_Fixture f) {
+      f.activatePairing('dynamic_pairing_code', format: 'digits');
+      f.server
+          .sendJson('server/pair-init', {'nonce_A': base64UrlNoPad(_nonceA)});
+    }
+
+    void cancel(_Fixture f) =>
+        f.server.sendJson('server/activate', {'activities': <String>[]});
+
+    test('a round counts once its code is being emitted', () {
+      final f = _Fixture(_dynamic());
+      startRound(f);
+      expect(f.pairing.roundsSinceVerified, 1);
+      cancel(f);
+      expect(f.pairing.roundsSinceVerified, 1);
+    });
+
+    test('an attempt cancelled before its code was emitted does not count', () {
+      final f = _Fixture(_dynamic());
+      f.activatePairing('dynamic_pairing_code', format: 'digits');
+      cancel(f);
+      expect(f.pairing.roundsSinceVerified, 0);
+    });
+
+    test('a round is counted once, not again when it fails', () {
+      final f = _Fixture(_dynamic());
+      startRound(f);
+      f.sendAuth(utf8.encode('000000'));
+      f.sendConfirm();
+      expect(f.sent.last['type'], 'client/pair-retry');
+      expect(f.pairing.roundsSinceVerified, 1);
+    });
+
+    test('20 abandoned rounds hold the next attempt back', () {
+      final f = _Fixture(_dynamic());
+      for (var i = 0; i < 20; i++) {
+        expect(f.pairing.isHoldingBack, isFalse);
+        startRound(f);
+        cancel(f);
+      }
+      f.server.receivedJson.clear();
+      f.activatePairing('dynamic_pairing_code', format: 'digits');
+      expect(f.sent.single['type'], 'client/pair-pending');
+    });
+
+    test('the count survives a restart', () async {
+      final store = _MemoryStore();
+      final f =
+          _Fixture(_dynamic(), pairing: await SendspinPairing.load(store));
+      startRound(f);
+      startRound(f);
+      await pumpEventQueue();
+      final reloaded = await SendspinPairing.load(store);
+      expect(reloaded.roundsSinceVerified, 2);
+    });
+
+    test('stored data without a round count reads as zero', () {
+      final json = SendspinPairingData(
+              pairingPsk: Uint8List(32), records: const [], pairingRounds: 7)
+          .toJson();
+      expect(SendspinPairingData.fromJson(json).pairingRounds, 7);
+      json.remove('pairing_rounds');
+      expect(SendspinPairingData.fromJson(json).pairingRounds, 0);
+    });
+
+    test('nonce_A in a later round is a protocol error', () {
+      final f = _Fixture(_dynamic());
+      startRound(f);
+      f.sendAuth(utf8.encode('000000'));
+      f.sendConfirm();
+      f.server.receivedJson.clear();
+      f.server
+          .sendJson('server/pair-init', {'nonce_A': base64UrlNoPad(_nonceA)});
+      expect(f.closes, hasLength(1));
+      expect(f.sent, isEmpty);
+    });
+  });
+
+  group('a pending attempt', () {
+    _Fixture pending() {
+      final f = _Fixture(SendspinStaticCodePairing(code: '48151623'));
+      f.activatePairing('static_pairing_code');
+      expect(f.sentTypes, ['client/pair-pending']);
+      return f;
+    }
+
+    test('is ended by pair/abort from the server', () {
+      final f = pending();
+      f.server.sendJson('pair/abort', {'reason': 'user_cancelled'});
+      expect(f.aborted, ['user_cancelled']);
+      f.pairing.openPairingWindow();
+      expect(f.sentTypes, ['client/pair-pending']);
+    });
+
+    test('is ended by cancelPairing', () {
+      final f = pending();
+      f.protocol.cancelPairing();
+      expect(f.sent.last, {
+        'type': 'pair/abort',
+        'payload': {'reason': 'user_cancelled'},
+      });
+      f.pairing.openPairingWindow();
+      expect(f.sentTypes, ['client/pair-pending', 'pair/abort']);
+    });
+  });
+
+  group('pairing window ownership', () {
+    SendspinCodePairing staticCode() =>
+        SendspinStaticCodePairing(code: '48151623');
+
+    test('admits attempts only on the connection that carried its first', () {
+      final a = _Fixture(staticCode());
+      final b = _Fixture(staticCode(), pairing: a.pairing);
+      a.pairing.openPairingWindow();
+      a.activatePairing('static_pairing_code');
+      b.activatePairing('static_pairing_code');
+      expect(a.sentTypes, ['client/pair-init']);
+      expect(b.sentTypes, ['client/pair-pending']);
+    });
+
+    test('an attempt from an earlier window does not close a later one', () {
+      final a = _Fixture(staticCode());
+      final b = _Fixture(staticCode(), pairing: a.pairing);
+      a.pairing.openPairingWindow();
+      a.activatePairing('static_pairing_code');
+      // The first window ends while a's attempt runs on; b uses the next.
+      a.pairing.closePairingWindow();
+      a.pairing.openPairingWindow();
+      b.activatePairing('static_pairing_code');
+      expect(b.sentTypes, ['client/pair-init']);
+
+      a.sendAuth(utf8.encode('48151623'));
+      a.sendConfirm();
+      a.server.sendJson('server/pair-finalize');
+      expect(a.paired, hasLength(1));
+      expect(a.pairing.isPairingWindowOpen, isTrue);
+    });
+
+    test('failures on another connection do not count against it', () {
+      final pairing = SendspinPairing.inMemory()..openPairingWindow();
+      final owner = Object();
+      final other = Object();
+      expect(pairing.claimPairingWindow(owner), isTrue);
+      for (var i = 0; i < 5; i++) {
+        pairing.recordWindowFailure(other);
+      }
+      expect(pairing.isPairingWindowOpen, isTrue);
+    });
+
+    test('opening a window that is open keeps its owner and failures', () {
+      final pairing = SendspinPairing.inMemory()..openPairingWindow();
+      final owner = Object();
+      pairing.claimPairingWindow(owner);
+      for (var i = 0; i < 4; i++) {
+        pairing.recordWindowFailure(owner);
+      }
+      pairing.openPairingWindow();
+      expect(pairing.claimPairingWindow(Object()), isFalse);
+      pairing.recordWindowFailure(owner);
+      expect(pairing.isPairingWindowOpen, isFalse);
+    });
+
+    test('opening a window that is open does not extend its lifetime', () {
+      fakeAsync((async) {
+        final pairing = SendspinPairing.inMemory()..openPairingWindow();
+        async.elapse(const Duration(minutes: 4));
+        pairing.openPairingWindow();
+        async.elapse(const Duration(seconds: 61));
+        expect(pairing.isPairingWindowOpen, isFalse);
+      });
+    });
+
+    test('a pairing completes at a later pairing index', () {
+      final f = _Fixture(staticCode());
+      f.pairing.openPairingWindow();
+      f.activatePairing('static_pairing_code');
+      f.sendAuth(utf8.encode('00000000'));
+      f.sendConfirm();
+      f.activatePairing('static_pairing_code');
+      f.sendAuth(utf8.encode('48151623'), pairingIndex: 2);
+      f.sendConfirm();
+      expect(f.sentTypes.last, 'client/pair-finalize');
+      expect(f.clientTagVerifies, isTrue);
+    });
+  });
+
+  group('configuration', () {
+    test('the offered sets are snapshots the caller cannot change', () {
+      final formats = {'digits'};
+      final config = SendspinDynamicCodePairing(formats: formats);
+      formats.add('qr_code');
+      expect(config.formats, {'digits'});
+      expect(() => config.formats.add('qr_code'), throwsUnsupportedError);
+      expect(() => config.outChannels.add('speaker'), throwsUnsupportedError);
+    });
+
+    test('qr_code needs a display', () {
+      expect(
+          () => SendspinDynamicCodePairing(
+              outChannels: {'speaker'}, formats: {'digits', 'qr_code'}),
+          throwsArgumentError);
+    });
+
+    test('the emitted code cannot be used to change the CPace password', () {
+      final f = _Fixture(_dynamic());
+      f.activatePairing('dynamic_pairing_code', format: 'digits');
+      f.server
+          .sendJson('server/pair-init', {'nonce_A': base64UrlNoPad(_nonceA)});
+      expect(() => f.shown.single.rawCode[0] = 0, throwsUnsupportedError);
     });
   });
 }

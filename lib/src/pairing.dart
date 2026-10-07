@@ -57,16 +57,22 @@ class SendspinPairingData {
   /// Pairing records, least recently used first.
   final List<SendspinPairingRecord> records;
 
+  /// Dynamic-code pairing rounds since one last verified. Persisted so a
+  /// restart does not hand a server a fresh allowance of guesses.
+  final int pairingRounds;
+
   /// The pairing PSK is copied and unmodifiable, and so is the record list.
   SendspinPairingData({
     required Uint8List pairingPsk,
     required List<SendspinPairingRecord> records,
+    this.pairingRounds = 0,
   })  : pairingPsk = Uint8List.fromList(pairingPsk).asUnmodifiableView(),
         records = List.unmodifiable(records);
 
   Map<String, dynamic> toJson() => {
         'pairing_psk': base64UrlNoPad(pairingPsk),
         'records': records.map((r) => r.toJson()).toList(),
+        'pairing_rounds': pairingRounds,
       };
 
   factory SendspinPairingData.fromJson(Map<String, dynamic> json) =>
@@ -77,6 +83,8 @@ class SendspinPairingData {
             .map((r) =>
                 SendspinPairingRecord.fromJson(r as Map<String, dynamic>))
             .toList(),
+        // Absent in data written before code-based pairing existed.
+        pairingRounds: json['pairing_rounds'] as int? ?? 0,
       );
 }
 
@@ -133,10 +141,12 @@ class SendspinDynamicCodePairing extends SendspinCodePairing {
   @override
   final Set<String> formats;
 
+  /// The sets are copied: later changes to the caller's have no effect.
   SendspinDynamicCodePairing({
-    this.outChannels = const {'display'},
-    this.formats = const {'digits'},
-  }) {
+    Set<String> outChannels = const {'display'},
+    Set<String> formats = const {'digits'},
+  })  : outChannels = Set.unmodifiable(outChannels),
+        formats = Set.unmodifiable(formats) {
     if (outChannels.isEmpty ||
         !outChannels.every(const {'display', 'speaker'}.contains)) {
       throw ArgumentError.value(outChannels, 'outChannels',
@@ -146,6 +156,10 @@ class SendspinDynamicCodePairing extends SendspinCodePairing {
         !formats.every(const {'digits', 'qr_code'}.contains)) {
       throw ArgumentError.value(formats, 'formats',
           "must be a non-empty subset of 'digits', 'qr_code'");
+    }
+    if (formats.contains('qr_code') && !outChannels.contains('display')) {
+      throw ArgumentError.value(
+          formats, 'formats', "'qr_code' requires the 'display' out-channel");
     }
   }
 
@@ -178,7 +192,8 @@ class SendspinStaticCodePairing extends SendspinCodePairing {
   /// Where the operator finds the code: `device`, `leaflet`, `operator`.
   final List<String>? locations;
 
-  SendspinStaticCodePairing({required this.code, this.locations}) {
+  SendspinStaticCodePairing({required this.code, List<String>? locations})
+      : locations = locations == null ? null : List.unmodifiable(locations) {
     if (!RegExp(r'^\d{8}$').hasMatch(code)) {
       throw ArgumentError.value(
           code.length, 'code.length', 'A static pairing code is 8 digits');
@@ -210,15 +225,15 @@ class SendspinPairingCode {
   final String display;
 
   /// The bytes fed to the key exchange: the ASCII digits, or the 24-byte
-  /// code the token carries.
+  /// code the token carries. An unmodifiable copy.
   final Uint8List rawCode;
 
   SendspinPairingCode({
     required this.format,
     required this.code,
     required this.display,
-    required this.rawCode,
-  });
+    required Uint8List rawCode,
+  }) : rawCode = Uint8List.fromList(rawCode).asUnmodifiableView();
 }
 
 /// Encodes a version-1 pairing token: the 24-byte dynamic pairing code in
@@ -275,8 +290,7 @@ class SendspinPairing {
   /// Notified when a held-back attempt may be able to proceed.
   final List<void Function()> _listeners = [];
 
-  int _failedRounds = 0;
-  bool _holdingBack = false;
+  int _rounds;
 
   bool _windowOpen = false;
   int _windowFailures = 0;
@@ -290,8 +304,8 @@ class SendspinPairing {
   /// Failed attempts that close a static pairing window.
   static const int windowFailureLimit = 5;
 
-  SendspinPairing._(
-      this._store, this._pairingPsk, this._records, this.capacity) {
+  SendspinPairing._(this._store, this._pairingPsk, this._records, this.capacity,
+      [this._rounds = 0]) {
     if (capacity < minimumCapacity) {
       throw ArgumentError.value(capacity, 'capacity',
           'A client must hold at least $minimumCapacity pairing records');
@@ -332,7 +346,7 @@ class SendspinPairing {
           'bytes, expected $pskLength. Refusing to replace it.');
     }
     return SendspinPairing._(store, Uint8List.fromList(data.pairingPsk),
-        List.of(data.records), capacity);
+        List.of(data.records), capacity, data.pairingRounds);
   }
 
   /// The device's pairing PSK. Expose it to an operator only as a
@@ -413,33 +427,34 @@ class SendspinPairing {
     }
   }
 
-  /// Dynamic-code rounds that have failed since one last verified. Not
-  /// partitioned by server.
-  int get failedRounds => _failedRounds;
+  /// Dynamic-code rounds begun since one last verified, however they ended.
+  /// Not partitioned by server, and persisted with the records.
+  int get roundsSinceVerified => _rounds;
 
-  /// True once the round limit has been reached: dynamic-code attempts are
-  /// answered with `client/pair-pending` until [releaseHoldBack].
-  bool get isHoldingBack => _holdingBack;
+  /// True once the round limit has been reached: a round that fails is not
+  /// retried, and new dynamic-code attempts are answered with
+  /// `client/pair-pending` until [releaseHoldBack].
+  bool get isHoldingBack => _rounds >= roundLimit;
 
-  /// Records the outcome of a dynamic-code round. Returns true when a
-  /// failure reached the round limit, so the attempt must be aborted.
-  bool recordRound({required bool verified}) {
-    if (verified) {
-      _failedRounds = 0;
-      return false;
-    }
-    _failedRounds++;
-    if (_failedRounds < roundLimit) return false;
-    _holdingBack = true;
-    return true;
+  /// Counts a dynamic-code round. Called when its code starts being
+  /// emitted, so a round the server abandons is counted like one that fails.
+  Future<void> beginRound() {
+    _rounds++;
+    return _save();
+  }
+
+  /// Resets the round count: a server proved it knew the code.
+  Future<void> roundVerified() {
+    _rounds = 0;
+    return _save();
   }
 
   /// Lets dynamic-code attempts proceed again and resets the round count.
   /// Call this only for a deliberate operator action on the device.
-  void releaseHoldBack() {
-    _holdingBack = false;
-    _failedRounds = 0;
+  Future<void> releaseHoldBack() {
+    _rounds = 0;
     _notify();
+    return _save();
   }
 
   /// Whether a static-code pairing window is open.
@@ -448,9 +463,11 @@ class SendspinPairing {
   /// Opens a pairing window: static-code attempts are accepted until one
   /// succeeds, five fail, the connection using it drops, or [lifetime]
   /// passes. Call this for a deliberate physical gesture on the device (a
-  /// button press), not for anything that can be triggered remotely.
+  /// button press), not for anything that can be triggered remotely. Does
+  /// nothing while a window is open: it keeps its lifetime, its failure
+  /// count and the connection using it.
   void openPairingWindow({Duration lifetime = const Duration(minutes: 5)}) {
-    _windowTimer?.cancel();
+    if (_windowOpen) return;
     _windowOpen = true;
     _windowFailures = 0;
     _windowOwner = null;
@@ -475,15 +492,17 @@ class SendspinPairing {
     return identical(_windowOwner, connection);
   }
 
-  /// Records a failed static-code attempt; the fifth closes the window.
-  void recordWindowFailure() {
-    if (!_windowOpen) return;
+  /// Records a failed static-code attempt on [connection]; the fifth closes
+  /// the window. An attempt admitted by an earlier window does not count.
+  void recordWindowFailure(Object connection) {
+    if (!identical(_windowOwner, connection)) return;
     _windowFailures++;
     if (_windowFailures >= windowFailureLimit) closePairingWindow();
   }
 
-  /// Closes the window if [connection] is the one using it.
-  void connectionDropped(Object connection) {
+  /// Closes the window if [connection] is the one using it: it dropped, or
+  /// completed a pairing.
+  void closePairingWindowFor(Object connection) {
     if (identical(_windowOwner, connection)) closePairingWindow();
   }
 
@@ -491,6 +510,7 @@ class SendspinPairing {
     await _store?.save(SendspinPairingData(
       pairingPsk: Uint8List.fromList(_pairingPsk),
       records: List.of(_records),
+      pairingRounds: _rounds,
     ));
   }
 }
