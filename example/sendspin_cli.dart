@@ -6,7 +6,8 @@
 //          [--seconds N] [--key-file PATH] [--pairing-file PATH]
 //          [--token-file PATH] [--no-unpaired] [--name NAME]
 //          [--pcm-out PATH|-] [--latency-ms N] [--artwork]
-//          [--send-command NAME]
+//          [--send-command NAME] [--dynamic-code digits|qr_code]
+//          [--static-code 12345678] [--code-file PATH]
 //
 // With `--pcm-out -` the decoded audio goes to stdout as 16-bit little-endian
 // PCM and the log goes to stderr, e.g.
@@ -63,7 +64,8 @@ Future<void> main(List<String> args) async {
         '[--seconds N] [--key-file PATH] [--pairing-file PATH] '
         '[--token-file PATH] [--no-unpaired] [--name NAME] '
         '[--pcm-out PATH|-] [--latency-ms N] [--artwork] '
-        '[--send-command NAME]');
+        '[--send-command NAME] [--dynamic-code digits|qr_code] '
+        '[--static-code 12345678] [--code-file PATH]');
     exit(64);
   }
   final url = args.first;
@@ -84,12 +86,23 @@ Future<void> main(List<String> args) async {
   final tokenFile = _option(args, '--token-file');
   if (tokenFile != null) await File(tokenFile).writeAsString(token);
 
+  final dynamicFormat = _option(args, '--dynamic-code');
+  final staticCode = _option(args, '--static-code');
+  final codeFile = _option(args, '--code-file');
+  // A real device opens the window on a button press; this stands in for it.
+  if (staticCode != null) pairing.openPairingWindow();
+
   final player = SendspinPlayer(
     playerName: _option(args, '--name') ?? 'sendspin_dart example',
     identity: identity,
     bufferSeconds: 5,
     unpairedAccess: !args.contains('--no-unpaired'),
     pairing: pairing,
+    codePairing: dynamicFormat != null
+        ? SendspinDynamicCodePairing(formats: {dynamicFormat})
+        : staticCode != null
+            ? SendspinStaticCodePairing(code: staticCode)
+            : null,
     additionalRoles: {
       SendspinRole.metadata,
       SendspinRole.controller,
@@ -117,6 +130,11 @@ Future<void> main(List<String> args) async {
   player.onClose = (reason) => finish('closed: $reason');
   player.onServerError = (reason) => _log('server/error $reason');
   player.onPaired = (serverId) => _log('paired with $serverId');
+  player.onPairingCode = (code) {
+    _log('pairing code (${code.format}): ${code.display}');
+    if (codeFile != null) File(codeFile).writeAsStringSync(code.code);
+  };
+  player.onPairingCodeEnded = () => _log('pairing code no longer shown');
   player.onPairingAborted = (reason) => _log('pairing aborted: $reason');
   player.onActivate = (activities, roles) =>
       _log('activate activities=$activities roles=$roles '
