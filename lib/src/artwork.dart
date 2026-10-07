@@ -30,12 +30,17 @@ const int _maxMessageLength = 65519;
 class _PendingImage {
   final int timestampUs;
   final int totalSize;
-  final BytesBuilder data = BytesBuilder(copy: false);
+
+  /// True when the image's bytes are counted but not kept: the client is
+  /// unavailable, or the image is larger than it is willing to hold.
+  final bool discard;
+  final BytesBuilder data = BytesBuilder(copy: true);
+  int received = 0;
   Timer? timer;
 
-  _PendingImage(this.timestampUs, this.totalSize);
+  _PendingImage(this.timestampUs, this.totalSize, {required this.discard});
 
-  bool get isComplete => data.length == totalSize;
+  bool get isComplete => received == totalSize;
 }
 
 /// Receives artwork for up to four channels.
@@ -50,6 +55,11 @@ class ArtworkReceiver {
   /// clock, by the time filter's current estimate. Zero or less means now.
   final int Function(int timestampUs) usUntil;
 
+  /// The largest image that is kept. A larger one is still received and
+  /// tracked to the end of its transfer, as the role requires, but its bytes
+  /// are not stored and it is never shown.
+  static const int maxImageBytes = 32 * 1024 * 1024;
+
   /// Called when a channel's image changes: a pending image became current,
   /// or the channel was cleared, in which case the image data is empty.
   void Function(ArtworkFrame frame)? onImage;
@@ -63,14 +73,27 @@ class ArtworkReceiver {
 
   ArtworkReceiver({required this.usUntil});
 
-  /// The image a channel currently shows, or null if it shows none.
-  Uint8List? currentImage(int channel) =>
-      channel >= 0 && channel < _channelCount ? _current[channel] : null;
+  /// A copy of the image a channel currently shows, or null if it shows
+  /// none.
+  Uint8List? currentImage(int channel) {
+    final image =
+        channel >= 0 && channel < _channelCount ? _current[channel] : null;
+    return image == null ? null : Uint8List.fromList(image);
+  }
 
   /// Handles one artwork binary message (IDs 8-11). Malformed messages
   /// always throw [ArtworkError]; a well-formed message outside an active
   /// artwork stream is ignored.
-  void handleMessage(Uint8List message, {required bool streamActive}) {
+  ///
+  /// With [discard] set (the client is unavailable) announces, parts and
+  /// cancels are still processed and checked, but an image's bytes are not
+  /// kept and it is not shown. A zero-size image, which clears the channel,
+  /// is applied regardless.
+  void handleMessage(
+    Uint8List message, {
+    required bool streamActive,
+    bool discard = false,
+  }) {
     if (message.length < 2) {
       throw const ArtworkError('message shorter than two bytes');
     }
@@ -78,6 +101,9 @@ class ArtworkReceiver {
       throw const ArtworkError('message exceeds the size cap');
     }
     final channel = message[0] - _firstArtworkId;
+    if (channel < 0 || channel >= _channelCount) {
+      throw const ArtworkError('not an artwork message ID');
+    }
     final flags = message[1];
     if (flags & _flagsReserved != 0) {
       throw const ArtworkError('reserved flag bit set');
@@ -103,8 +129,12 @@ class ArtworkReceiver {
       }
       final view = ByteData.sublistView(message);
       _discardPending(channel);
+      final totalSize = view.getUint32(10, Endian.big);
       final pending = _PendingImage(
-          view.getInt64(2, Endian.big), view.getUint32(10, Endian.big));
+        view.getInt64(2, Endian.big),
+        totalSize,
+        discard: totalSize > maxImageBytes || (discard && totalSize > 0),
+      );
       _pending[channel] = pending;
       if (pending.isComplete) {
         _evaluate(channel);
@@ -117,13 +147,20 @@ class ArtworkReceiver {
         throw const ArtworkError('part without a transfer on its channel');
       }
       final length = message.length - 2;
-      if (pending.data.length + length > pending.totalSize) {
+      if (pending.received + length > pending.totalSize) {
         throw const ArtworkError('part extends past total_size');
       }
-      pending.data.add(Uint8List.sublistView(message, 2));
+      pending.received += length;
+      if (!pending.discard) {
+        pending.data.add(Uint8List.sublistView(message, 2));
+      }
       if (pending.isComplete) {
         _transferChannel = null;
-        _evaluate(channel);
+        if (pending.discard) {
+          _pending[channel] = null;
+        } else {
+          _evaluate(channel);
+        }
       }
     }
   }
@@ -150,8 +187,11 @@ class ArtworkReceiver {
     final image = pending.data.takeBytes();
     // An empty image clears the channel.
     _current[channel] = image.isEmpty ? null : image;
+    // The consumer gets its own copy; what the channel shows stays ours.
     onImage?.call(ArtworkFrame(
-        channel: channel, timestampUs: pending.timestampUs, imageData: image));
+        channel: channel,
+        timestampUs: pending.timestampUs,
+        imageData: Uint8List.fromList(image)));
   }
 
   /// Re-checks every pending image, after the time filter has moved.
@@ -167,10 +207,27 @@ class ArtworkReceiver {
   void streamStarted(List<dynamic> channels) {
     for (var channel = 0; channel < _channelCount; channel++) {
       final config =
-          channel < channels.length ? jsonEncode(channels[channel]) : null;
+          channel < channels.length ? _configKey(channels[channel]) : null;
       if (config != _config[channel]) _discardPending(channel);
       _config[channel] = config;
     }
+  }
+
+  /// A channel's configuration reduced to the fields that define it, so two
+  /// spellings of the same configuration compare equal. A channel that is
+  /// not streamed (`source: 'none'`, or malformed) is the same as an absent
+  /// one.
+  static String? _configKey(Object? channel) {
+    if (channel is! Map<String, dynamic>) return null;
+    final source = channel['source'];
+    if (source is! String || source == 'none') return null;
+    Object? number(Object? v) => v is num ? v.toDouble() : v;
+    return jsonEncode([
+      source,
+      channel['format'],
+      number(channel['width']),
+      number(channel['height']),
+    ]);
   }
 
   /// Ends the artwork stream: every channel's current image is cleared and

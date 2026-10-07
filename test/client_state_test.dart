@@ -188,6 +188,23 @@ void main() {
       });
     });
 
+    test('zero round-trip time measurements do not break the time filter', () {
+      // On a fast loopback the measured round trip can be 0 µs. That must
+      // not reach the filter as a zero-variance measurement.
+      fakeAsync((async) {
+        final protocol =
+            _protocol(now: () => 1000000 + async.elapsed.inMicroseconds);
+        final server = connect(protocol, activate: false);
+        _answerTime(server);
+        activate(server, protocol);
+        async.elapse(const Duration(seconds: 60));
+        expect(protocol.clock.sampleCount, greaterThan(3));
+        expect(protocol.clock.precisionUs.isFinite, isTrue);
+        expect(protocol.clock.computeClientTime(5000000), 5000000);
+        protocol.dispose();
+      });
+    });
+
     test('bursts return to the normal interval once synchronized', () {
       fakeAsync((async) {
         final protocol =

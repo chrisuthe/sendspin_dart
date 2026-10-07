@@ -202,9 +202,13 @@ class SendspinProtocol {
 
   late final ArtworkReceiver _artwork = ArtworkReceiver(
     // With no samples the filter cannot place a timestamp: show it now.
-    usUntil: (timestampUs) => _clock.sampleCount == 0
-        ? 0
-        : _clock.computeClientTime(timestampUs) - nowUs(),
+    usUntil: (timestampUs) {
+      if (_clock.sampleCount == 0) return 0;
+      // Compared before subtracting, so an extreme timestamp cannot wrap.
+      final dueUs = _clock.computeClientTime(timestampUs);
+      final now = nowUs();
+      return dueUs <= now ? 0 : dueUs - now;
+    },
   )..onImage = (frame) => onArtworkFrame?.call(frame);
   bool _artworkStreamActive = false;
 
@@ -1324,7 +1328,11 @@ class SendspinProtocol {
     // best-RTT sample of the burst and only feeds that one into the
     // filter. The state-update callback wired in [_wireTimeBurst] runs
     // when the burst completes.
-    _timeBurst.onTimeResponse(offset, delay ~/ 2, clientReceived);
+    // max_error is the filter's measurement uncertainty. A round trip that
+    // measures as zero (or negative, from timestamp granularity) would make
+    // it a zero-variance measurement and divide by zero inside the filter.
+    final maxError = delay ~/ 2 < 1 ? 1 : delay ~/ 2;
+    _timeBurst.onTimeResponse(offset, maxError, clientReceived);
   }
 
   void _handleStreamStart(Map<String, dynamic> payload) {
@@ -1542,9 +1550,14 @@ class SendspinProtocol {
       // A client that does not implement the artwork role ignores its IDs.
       if (!roles.contains(SendspinRole.artwork)) return;
       try {
-        _artwork.handleMessage(data,
-            streamActive:
-                _artworkStreamActive && isRoleActive(SendspinRole.artwork));
+        _artwork.handleMessage(
+          data,
+          streamActive:
+              _artworkStreamActive && isRoleActive(SendspinRole.artwork),
+          // An unavailable client discards image data but keeps following
+          // the transfer.
+          discard: !isAvailable,
+        );
       } on ArtworkError catch (e) {
         // Malformed artwork messages and sequences are protocol errors.
         _channel.close('artwork: ${e.message}');

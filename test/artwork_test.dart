@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:fake_async/fake_async.dart';
@@ -151,6 +152,59 @@ void main() {
       });
     });
 
+    test('every message type maps to its channel', () {
+      fakeAsync((async) {
+        final protocol = SendspinProtocol(
+          playerName: 'Display',
+          identity: testIdentity,
+          bufferSeconds: 0,
+          unpairedAccess: true,
+          roles: const {SendspinRole.artwork},
+          artworkChannels: const [_album, _album, _album, _album],
+        );
+        final images = <ArtworkFrame>[];
+        protocol.onArtworkFrame = images.add;
+        final server = connect(protocol);
+        server.sendJson('stream/start', {
+          'artwork': {
+            'channels': List.filled(4, {
+              'source': 'album',
+              'format': 'jpeg',
+              'width': 300,
+              'height': 300
+            }),
+          },
+        });
+        for (var channel = 0; channel < 4; channel++) {
+          final announce = Uint8List(14)
+            ..[0] = 8 + channel
+            ..[1] = 0x02;
+          ByteData.view(announce.buffer).setUint32(10, 1, Endian.big);
+          server.sendMessage(announce);
+          server.sendMessage(Uint8List.fromList([8 + channel, 0, channel]));
+        }
+        expect(images.map((f) => f.channel), [0, 1, 2, 3]);
+        protocol.dispose();
+      });
+    });
+
+    test('a delivered image is the consumer\'s own copy', () {
+      _run((rig) {
+        rig.image(0, [1, 2, 3]);
+        rig.images.single.imageData[0] = 99;
+        expect(rig.protocol.currentArtwork(0), [1, 2, 3]);
+      });
+    });
+
+    test('a message of exactly the size cap is accepted', () {
+      _run((rig) {
+        rig.announce(0, rig.now(), 65517);
+        rig.server.sendMessage(Uint8List(65519)..[0] = 8);
+        expect(rig.closes, isEmpty);
+        expect(rig.images.single.imageData, hasLength(65517));
+      });
+    });
+
     test('artwork arriving late is still shown', () {
       _run((rig) {
         rig.image(0, [1], timestampUs: rig.now() - 60000000);
@@ -225,6 +279,48 @@ void main() {
       });
     });
 
+    test('a pending image is re-checked when the time filter moves', () {
+      _run((rig) {
+        // Held for an hour by the first estimate (server == local).
+        rig.image(0, [1], timestampUs: rig.now() + 3600000000);
+        expect(rig.protocol.currentArtwork(0), isNull);
+
+        // The next clock-sync burst shows the server clock is 2 h ahead, so
+        // that timestamp is already in the past.
+        rig.server.onJson = (msg) {
+          if (msg['type'] != 'client/time') return;
+          final t = (msg['payload'] as Map)['client_transmitted'] as int;
+          scheduleMicrotask(() => rig.server.sendJson('server/time', {
+                'client_transmitted': t,
+                'server_received': t + 7200000000,
+                'server_transmitted': t + 7200000000,
+              }));
+        };
+        rig.protocol.clock.reset();
+        rig.async.elapse(const Duration(seconds: 25));
+        expect(rig.protocol.currentArtwork(0), [1]);
+      });
+    });
+
+    test('a pending image does not appear after a reset', () {
+      _run((rig) {
+        rig.image(0, [1], timestampUs: rig.now() + 2000000);
+        rig.protocol.resetForNewConnection();
+        rig.async.elapse(const Duration(seconds: 5));
+        expect(rig.images, isEmpty);
+        expect(rig.protocol.currentArtwork(0), isNull);
+      });
+    });
+
+    test('a pending image does not appear after dispose', () {
+      _run((rig) {
+        rig.image(0, [1], timestampUs: rig.now() + 2000000);
+        rig.protocol.dispose();
+        rig.async.elapse(const Duration(seconds: 5));
+        expect(rig.images, isEmpty);
+      });
+    });
+
     test('an image is shown immediately while the time filter has no samples',
         () {
       _run((rig) {
@@ -260,6 +356,28 @@ void main() {
       });
     });
 
+    test('a stream/end without a roles list ends the artwork stream', () {
+      _run((rig) {
+        rig.image(0, [1]);
+        rig.server.sendJson('stream/end');
+        expect(rig.protocol.currentArtwork(0), isNull);
+      });
+    });
+
+    test('an unchanged stream/start does not disturb a transfer in flight', () {
+      _run((rig) {
+        rig.announce(0, rig.now(), 2);
+        rig.part(0, [1]);
+        rig.startStream([
+          {'height': 300, 'width': 300.0, 'format': 'jpeg', 'source': 'album'},
+          {'source': 'artist', 'format': 'png', 'width': 128, 'height': 128},
+        ]);
+        rig.part(0, [2]);
+        expect(rig.closes, isEmpty);
+        expect(rig.protocol.currentArtwork(0), [1, 2]);
+      });
+    });
+
     test('a stream/end for another role leaves artwork alone', () {
       _run((rig) {
         rig.image(0, [1]);
@@ -286,12 +404,88 @@ void main() {
       });
     });
 
+    test('an equivalent stream/start keeps the pending images', () {
+      _run((rig) {
+        rig.image(0, [1], timestampUs: rig.now() + 5000000);
+        // Same configuration: keys in another order, an extra field, and
+        // the unused channel written as 'none' instead of left out.
+        rig.startStream([
+          {'height': 300, 'width': 300, 'format': 'jpeg', 'source': 'album'},
+          {
+            'source': 'artist',
+            'format': 'png',
+            'width': 128,
+            'height': 128,
+            'future_field': true
+          },
+          {'source': 'none'},
+        ]);
+        rig.async.elapse(const Duration(seconds: 5));
+        expect(rig.protocol.currentArtwork(0), [1]);
+      });
+    });
+
     test('removing the artwork role clears its images', () {
       _run((rig) {
         rig.image(0, [1]);
         activate(rig.server, rig.protocol, roles: <String>[]);
         expect(rig.protocol.currentArtwork(0), isNull);
         expect(rig.images.last.imageData, isEmpty);
+      });
+    });
+  });
+
+  group('discarding image data', () {
+    test('an unavailable client discards images without closing', () {
+      _run((rig) {
+        rig.image(0, [1]);
+        rig.protocol.setAvailable(false);
+        rig.image(0, [2, 3]);
+        expect(rig.closes, isEmpty);
+        expect(rig.protocol.currentArtwork(0), [1],
+            reason: 'the image sent while unavailable is not shown');
+        expect(rig.images, hasLength(1));
+      });
+    });
+
+    test('a discarded transfer is still tracked to its end', () {
+      _run((rig) {
+        rig.protocol.setAvailable(false);
+        rig.announce(0, rig.now(), 4);
+        rig.part(0, [1, 2]);
+        // Still in flight: another announce is a malformed sequence.
+        rig.announce(1, rig.now(), 1);
+        expect(rig.closes, hasLength(1));
+      });
+    });
+
+    test('a discarded transfer still enforces total_size', () {
+      _run((rig) {
+        rig.protocol.setAvailable(false);
+        rig.announce(0, rig.now(), 2);
+        rig.part(0, [1, 2, 3]);
+        expect(rig.closes, hasLength(1));
+      });
+    });
+
+    test('a clear is applied even while unavailable', () {
+      _run((rig) {
+        rig.image(0, [1]);
+        rig.protocol.setAvailable(false);
+        rig.announce(0, rig.now(), 0);
+        expect(rig.protocol.currentArtwork(0), isNull);
+      });
+    });
+
+    test('an image larger than the size limit is counted but not kept', () {
+      _run((rig) {
+        final declared = ArtworkReceiver.maxImageBytes + 1;
+        rig.announce(0, rig.now(), declared);
+        rig.part(0, List.filled(1000, 7));
+        expect(rig.closes, isEmpty);
+        // The transfer is still in flight and still ordered.
+        rig.announce(1, rig.now(), 1);
+        expect(rig.closes, hasLength(1));
       });
     });
   });
@@ -327,6 +521,11 @@ void main() {
     });
 
     test('announce and cancel flags together', () {
+      // Two bytes long, so neither length rule can be what rejects it.
+      _run((rig) {
+        rig.server.sendMessage(Uint8List.fromList([8, 0x03]));
+        expect(rig.closes.single, contains('both'));
+      });
       expectClose(
           (rig) => rig.server.sendMessage(Uint8List(14)..setAll(0, [8, 0x03])));
     });
@@ -352,6 +551,35 @@ void main() {
       _run((rig) {
         rig.announce(0, rig.now(), 10);
         rig.announce(1, rig.now(), 10);
+        expect(rig.closes, hasLength(1));
+      });
+    });
+
+    test('an announce on the same channel while its transfer is in flight', () {
+      _run((rig) {
+        rig.announce(0, rig.now(), 10);
+        rig.announce(0, rig.now(), 10);
+        expect(rig.closes, hasLength(1));
+      });
+    });
+
+    test('a cancel on another channel leaves the transfer in flight', () {
+      _run((rig) {
+        rig.announce(0, rig.now(), 2);
+        rig.cancel(1);
+        rig.part(0, [1, 2]);
+        expect(rig.closes, isEmpty);
+        expect(rig.protocol.currentArtwork(0), [1, 2]);
+      });
+    });
+
+    test('a part after a stream/start changed its channel', () {
+      _run((rig) {
+        rig.announce(0, rig.now(), 2);
+        rig.startStream([
+          {'source': 'album', 'format': 'png', 'width': 300, 'height': 300},
+        ]);
+        rig.part(0, [1]);
         expect(rig.closes, hasLength(1));
       });
     });
@@ -386,6 +614,21 @@ void main() {
         rig.part(0, [3]);
         expect(rig.closes, hasLength(1));
       });
+    });
+  });
+
+  test('ArtworkReceiver rejects a message that is not an artwork ID', () {
+    final receiver = ArtworkReceiver(usUntil: (_) => 0);
+    expect(
+        () => receiver.handleMessage(Uint8List.fromList([4, 0]),
+            streamActive: true),
+        throwsA(isA<ArtworkError>()));
+  });
+
+  test('an image stamped at the far end of the int64 range is still shown', () {
+    _run((rig) {
+      rig.image(0, [1], timestampUs: -9223372036854775808);
+      expect(rig.protocol.currentArtwork(0), [1]);
     });
   });
 
