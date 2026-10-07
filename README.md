@@ -91,7 +91,7 @@ final samples = player.pullSamples(
 
 The player schedules every frame against the local clock: it translates the audio's server timestamp through the time filter, subtracts the output delay, and returns exactly the audio due at the `outputTimeUs` you pass. That is how it meets rc1's ±1 ms accuracy floor, and it is why `pullSamples` needs to know your output latency.
 
-- `outputTimeUs` does not have to be smooth. It is followed by a loop that rejects callback scheduling noise and tracks your device's real sample rate. It does have to be unbiased.
+- `outputTimeUs` does not have to be smooth. It is followed by a loop that rejects callback scheduling noise and tracks your device's real sample rate. It does have to be unbiased. If your output path's latency genuinely changes (a different sink, a reconfigured device), call `resetOutputClock()` so the next value is taken as it is.
 - On startup, after a seek, and after an underrun, playback snaps to position once: silence until the audio is due, or a dropped prefix if it is late.
 - In steady state, drift is corrected by dropping or repeating single frames, at most 0.5% of the audio in any 150 ms.
 - **Output delay** (`output_delay_ms`) is for delay *after* the audio port, such as an external amplifier. Delay before the port is what `outputTimeUs` covers. Do not put one in the other.
