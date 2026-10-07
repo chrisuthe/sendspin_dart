@@ -114,6 +114,23 @@ void main() {
       expect(() => protocol.sendControllerCommand('next'), throwsStateError);
     });
 
+    test('the reported command list cannot be edited by the consumer', () {
+      allowControllerCommands(protocol, ['play']);
+      expect(() => protocol.state.controller!.supportedCommands.add('next'),
+          throwsUnsupportedError);
+      expect(() => protocol.sendControllerCommand('next'), throwsStateError);
+    });
+
+    test('commands that need a parameter must use their typed method', () {
+      allowControllerCommands(protocol);
+      for (final command in ['volume', 'mute', 'seek', 'seek_relative']) {
+        expect(
+            () => protocol.sendControllerCommand(command), throwsArgumentError,
+            reason: command);
+      }
+      expect(sentOfType(protocol, 'client/command'), isEmpty);
+    });
+
     test('canSendControllerCommand reports what is currently allowed', () {
       expect(protocol.canSendControllerCommand('play'), isFalse);
       allowControllerCommands(protocol, ['play']);
